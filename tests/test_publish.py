@@ -42,8 +42,8 @@ def test_publish_returns_only_success_and_knowledge_id(client):
     body = {
         "kb_id": "kb-1",
         "title": "部署手册",
-        "content": "# t",
-        "tag": {"name": "技术文档"},
+        "content": "# 部署手册\n\n本文档描述了系统的部署流程，包括环境准备、配置步骤和验证方法。",
+        "tag_names": ["技术文档"],
         "custom_metas": {"level": 3},
     }
     with respx.mock(assert_all_called=False) as router:
@@ -55,10 +55,10 @@ def test_publish_returns_only_success_and_knowledge_id(client):
     data = resp.json()
     assert data["success"] is True
     assert data["knowledge_id"] == "kn-1"
-    assert data["tag_id"] == "tag-1"
-    assert data["tag_name"] == "技术文档"
+    assert data["tag_ids"] == ["tag-1"]
+    assert data["tag_names"] == ["技术文档"]
     # nothing else leaks into the success payload
-    assert set(data) <= {"success", "knowledge_id", "tag_id", "tag_name", "parse_status", "enable_status"}
+    assert set(data) <= {"success", "knowledge_id", "tag_ids", "tag_names", "parse_status", "enable_status"}
 
 
 def test_publish_writes_draft_then_metas_then_publish(client):
@@ -186,7 +186,7 @@ def test_publish_waits_when_configured(client):
 
 def test_publish_reuses_existing_tag_when_create_conflicts(client):
     """Create-first: if WeKnora rejects the create (tag already exists), resolve by query."""
-    body = {"kb_id": "kb-1", "title": "t", "content": "c", "tag": {"name": "技术文档"}}
+    body = {"kb_id": "kb-1", "title": "t", "content": "c", "tag_names": ["技术文档"]}
     with respx.mock(assert_all_called=False) as router:
         router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
         # create rejected because the tag already exists
@@ -215,5 +215,5 @@ def test_publish_reuses_existing_tag_when_create_conflicts(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["success"] is True
-    assert data["tag_id"] == "tag-exists"
-    assert data["tag_name"] == "技术文档"
+    assert data["tag_ids"] == ["tag-exists"]
+    assert data["tag_names"] == ["技术文档"]

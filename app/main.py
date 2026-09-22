@@ -32,12 +32,11 @@ async def lifespan(app: FastAPI):
     setup_logging(config.service.log_level)
     await startup(config)
     logger.info(
-        "weknora-forge %s started | upstream=%s | auth=%s | db=%s | trusted_proxies=%s",
+        "weknora-forge %s started | upstream=%s | auth=%s | db=%s",
         __version__,
         config.upstream.base_url,
         config.auth.mode,
         "configured" if config.database.configured else "not configured",
-        ",".join(config.proxy.trusted_proxies) if config.proxy.enabled else "disabled",
     )
     try:
         yield
@@ -88,7 +87,7 @@ def create_app() -> FastAPI:
 
     # HTTPS is terminated upstream (Cloudflare) while Forge speaks plain HTTP: rebuild
     # the caller's scheme / address from the forwarding headers of a trusted peer.
-    app.add_middleware(ProxyHeadersMiddleware, config=config.proxy)
+    app.add_middleware(ProxyHeadersMiddleware)
 
     # ---- v1 passthrough ----
     app.include_router(build_proxy_router("/api/v1", config))

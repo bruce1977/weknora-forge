@@ -118,11 +118,9 @@ class PurgeService:
         columns = await self.ex.columns(table)
         if not columns or "deleted_at" not in columns:
             return []
-        rows = await self.ex.fetch(
-            f"SELECT CAST(id AS TEXT) AS id FROM {quote_ident(table)} "
-            f"WHERE deleted_at IS NOT NULL AND deleted_at < :cutoff",
-            {"cutoff": cutoff},
-        )
+        sql = f"SELECT CAST(id AS TEXT) AS id FROM {quote_ident(table)} WHERE deleted_at IS NOT NULL AND deleted_at < :cutoff"
+        logger.debug("purge SQL: %s | params: %s", sql, {"cutoff": cutoff.isoformat()})
+        rows = await self.ex.fetch(sql, {"cutoff": cutoff})
         return [str(r["id"]) for r in rows]
 
     async def _soft_deleted_knowledges(self, cutoff: datetime, kb_ids: List[str]) -> List[str]:
@@ -134,9 +132,9 @@ class PurgeService:
         if kb_ids and "knowledge_base_id" in columns:
             where += " OR CAST(knowledge_base_id AS TEXT) IN :kb_ids"
             params["kb_ids"] = kb_ids
-        rows = await self.ex.fetch(
-            f"SELECT CAST(id AS TEXT) AS id FROM {quote_ident(KNOWLEDGE_TABLE)} WHERE {where}", params
-        )
+        sql = f"SELECT CAST(id AS TEXT) AS id FROM {quote_ident(KNOWLEDGE_TABLE)} WHERE {where}"
+        logger.debug("purge SQL: %s | params: %s", sql, {k: str(v)[:100] for k, v in params.items()})
+        rows = await self.ex.fetch(sql, params)
         return [str(r["id"]) for r in rows]
 
     # ------------------------------------------------------------------ #
@@ -151,14 +149,16 @@ class PurgeService:
             if not where:
                 report.skipped_tables.append(table)
                 continue
-            matched = int(
-                await self.ex.scalar(f"SELECT COUNT(*) FROM {quote_ident(table)} WHERE {where}", params) or 0
-            )
+            count_sql = f"SELECT COUNT(*) FROM {quote_ident(table)} WHERE {where}"
+            logger.debug("purge SQL: %s | params: %s", count_sql, {k: str(v)[:100] for k, v in params.items()})
+            matched = int(await self.ex.scalar(count_sql, params) or 0)
             report.matched[table] = matched
             if dry_run or not matched:
                 report.deleted[table] = 0
                 continue
-            report.deleted[table] = int(await self.ex.execute(f"DELETE FROM {quote_ident(table)} WHERE {where}", params))
+            del_sql = f"DELETE FROM {quote_ident(table)} WHERE {where}"
+            logger.debug("purge SQL: %s | params: %s", del_sql, {k: str(v)[:100] for k, v in params.items()})
+            report.deleted[table] = int(await self.ex.execute(del_sql, params))
 
     async def _delete_knowledge_bases(self, report: PurgeReport, kb_ids: List[str], dry_run: bool) -> None:
         if not kb_ids:
@@ -169,14 +169,16 @@ class PurgeService:
             return
         where = "CAST(id AS TEXT) IN :kb_ids"
         params = {"kb_ids": kb_ids}
-        matched = int(await self.ex.scalar(f"SELECT COUNT(*) FROM {quote_ident(KB_TABLE)} WHERE {where}", params) or 0)
+        count_sql = f"SELECT COUNT(*) FROM {quote_ident(KB_TABLE)} WHERE {where}"
+        logger.debug("purge SQL: %s | params: %s", count_sql, {"kb_ids": kb_ids[:5]})
+        matched = int(await self.ex.scalar(count_sql, params) or 0)
         report.matched[KB_TABLE] = matched
         if dry_run or not matched:
             report.deleted[KB_TABLE] = 0
             return
-        report.deleted[KB_TABLE] = int(
-            await self.ex.execute(f"DELETE FROM {quote_ident(KB_TABLE)} WHERE {where}", params)
-        )
+        del_sql = f"DELETE FROM {quote_ident(KB_TABLE)} WHERE {where}"
+        logger.debug("purge SQL: %s | params: %s", del_sql, {"kb_ids": kb_ids[:5]})
+        report.deleted[KB_TABLE] = int(await self.ex.execute(del_sql, params))
 
     # ------------------------------------------------------------------ #
     async def _sweep_orphans(self, report: PurgeReport, dry_run: bool) -> None:
@@ -206,14 +208,16 @@ class PurgeService:
                 continue
             where = " OR ".join(clauses)
             key = f"{table} (orphan)"
-            matched = int(await self.ex.scalar(f"SELECT COUNT(*) FROM {quote_ident(table)} WHERE {where}", params) or 0)
+            count_sql = f"SELECT COUNT(*) FROM {quote_ident(table)} WHERE {where}"
+            logger.debug("purge SQL: %s", count_sql)
+            matched = int(await self.ex.scalar(count_sql, params) or 0)
             report.orphan_matched[key] = matched
             if dry_run or not matched:
                 report.orphan_deleted[key] = 0
                 continue
-            report.orphan_deleted[key] = int(
-                await self.ex.execute(f"DELETE FROM {quote_ident(table)} WHERE {where}", params)
-            )
+            del_sql = f"DELETE FROM {quote_ident(table)} WHERE {where}"
+            logger.debug("purge SQL: %s", del_sql)
+            report.orphan_deleted[key] = int(await self.ex.execute(del_sql, params))
 
     # ------------------------------------------------------------------ #
     @staticmethod

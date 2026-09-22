@@ -81,13 +81,13 @@
 - **步骤**：`GET /api/v2/probe`（带 `auth_headers("GET", "/api/v2/probe")`）。
 - **预期**：
   - HTTP 200，`body.success == True`。
-  - `body.data.knowledge_base_count == 1`（取自 `total`）。
+  - `body.data.weknora.knowledge_base_count == 1`（取自 `total`）。
   - `body.data.auth_method` 为当前主体的鉴权方式。
 - **断言要点**：
   ```python
   assert resp.status_code == 200
   assert body["success"] is True
-  assert body["data"]["knowledge_base_count"] == 1
+  assert body["data"]["weknora"]["knowledge_base_count"] == 1
   ```
 
 ### TC-2.2 上游不可达（连接失败）→ 探针失败并以 502 上报
@@ -100,11 +100,11 @@
 - **预期**：
   - HTTP 200（`probe()` 不抛异常，端点不返回 5xx）。
   - `body.success == False`。
-  - `body.data.upstream_status == 502`（连接类错误映射为 502，而非 `reachable` 字段）。
+  - `body.data.weknora.upstream_status == 502`（连接类错误映射为 502）。
 - **断言要点**：
   ```python
   assert body["success"] is False
-  assert body["data"]["upstream_status"] == 502
+  assert body["data"]["weknora"]["upstream_status"] == 502
   ```
 
 ### TC-2.3 缺少 HMAC 签名 → 401（鉴权兜底）
@@ -123,7 +123,7 @@
 改用 `find_tag_by_name` 按名查询取回既有 `id`，避免重复创建不同 id 的标签。
 
 ### TC-3.1 标签已存在（创建被 409 拒绝）→ 查询复用既有 id
-- **测试函数**：`tests/test_api_endpoints.py::test_publish_reuses_existing_tag_when_create_conflicts`
+- **测试函数**：`tests/test_publish.py::test_publish_reuses_existing_tag_when_create_conflicts`
 - **前置**（respx 模拟）：
   - `VALIDATE_URL` → 200。
   - `POST {UPSTREAM}/knowledge-bases/kb-1/tags` → **409**
@@ -135,24 +135,24 @@
     `PUT .../knowledge/manual/kn-1` → 200（后续发布流程）。
 - **请求体**：
   ```json
-  {"kb_id": "kb-1", "title": "t", "content": "c", "tag": {"name": "技术文档"}}
+  {"kb_id": "kb-1", "title": "t", "content": "c", "tag_names": ["技术文档"]}
   ```
 - **步骤**：`POST /api/v2/publish`（带 HMAC 头）。
 - **预期**：
   - HTTP 200，`success == True`。
-  - `tag_id == "tag-exists"`（复用既有标签，**不是**新建标签）。
-  - `tag_name == "技术文档"`。
+  - `tag_ids == ["tag-exists"]`（复用既有标签，**不是**新建标签）。
+  - `tag_names == ["技术文档"]`。
 - **断言要点**：
   ```python
   assert resp.status_code == 200
   assert data["success"] is True
-  assert data["tag_id"] == "tag-exists"
-  assert data["tag_name"] == "技术文档"
+  assert data["tag_ids"] == ["tag-exists"]
+  assert data["tag_names"] == ["技术文档"]
   ```
 
 ### TC-3.2 标签不存在 → 正常创建（回归）
 - **相关**：既有 `test_publish_returns_only_success_and_knowledge_id` 等用例。
-- **预期**：`POST .../tags` → 200 返回新建 `tag-1`，发布返回 200 且 `tag_id == "tag-1"`，
+- **预期**：`POST .../tags` → 200 返回新建 `tag-1`，发布返回 200 且 `tag_ids == ["tag-1"]`，
   证明「标签不存在时仍走创建路径」未被破坏。
 
 ### TC-3.3 上游创建失败（非冲突，如 500）→ 502 错误信封
@@ -211,9 +211,7 @@ python -m pytest tests -q
 ```
 
 四项增强均带有 mock（respx + FakeExecutor），**不触碰真实 WeKnora / PostgreSQL**。
-预期：既有 ~98 项用例全绿，新增用例（`test_docs_and_openapi_are_served`、
-`test_probe_succeeds_when_weknora_reachable`、`test_probe_reports_failure_when_weknora_down`、
-`test_publish_reuses_existing_tag_when_create_conflicts`，以及 `kb_ids` 相关断言）一并通过。
+预期：92 项用例全绿。
 
 ---
 
@@ -313,5 +311,36 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 
 ---
 
-> **待办（非阻塞）**：`README.md` / `README_CN.md` 已同步 `/api/v2/probe`、`kb_ids`、
-> 开放 health、以及「仅 `X-Forge-Signature` 一个签名头」的变更。
+## 10. Publish 接口字段约束
+
+**相关实现**：`app/schemas.py::PublishRequest`。
+
+### TC-10.1 title 超过 200 字符 → 422
+- **请求体**：`title` 为 201 个字符。
+- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`。
+
+### TC-10.2 content 超过 10000 字符 → 422
+- **请求体**：`content` 为 10001 个字符。
+- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`。
+
+### TC-10.3 title 或 content 为空字符串 → 422
+- **请求体**：`title: ""` 或 `content: ""`。
+- **预期**：HTTP 422（`min_length=1`）。
+
+### TC-10.4 支持多标签 tag_names 数组
+- **请求体**：`tag_names: ["技术文档", "人工智能", "数据库"]`。
+- **预期**：HTTP 200，响应中 `tag_names` 和 `tag_ids` 均为长度 3 的数组。
+
+### TC-10.5 tag_names 中部分标签已存在、部分不存在 → 自动创建不存在的
+- **请求体**：`tag_names: ["技术文档", "new-tag-xyz"]`（"技术文档"已存在，"new-tag-xyz"不存在）。
+- **预期**：HTTP 200，两个标签均被关联（"new-tag-xyz"被自动创建）。
+
+### TC-10.6 tag_names 为空数组或不传 → 无标签
+- **请求体**：`tag_names: []` 或不传 `tag_names` 字段。
+- **预期**：HTTP 200，响应中 `tag_names` 和 `tag_ids` 为 null。
+
+---
+
+> **文档更新**：README.md / README_CN.md 已同步 `tag_names`（替代 `tag`）、
+> `tag_ids`（替代 `tag_id`）、开放 health、probe 双重连通性检查、
+> 移除 proxy 配置、移除 keystore 等变更。

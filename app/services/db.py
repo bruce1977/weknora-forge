@@ -199,8 +199,9 @@ class Database:
 
     async def ping(self) -> bool:
         try:
-            row = await self.executor().scalar("SELECT 1")
-            return row == 1
+            async with self.engine().connect() as conn:
+                row = await conn.execute(text("SELECT 1"))
+                return row.scalar() == 1
         except Exception as exc:  # noqa: BLE001
             logger.warning("database ping failed: %s", exc)
             return False

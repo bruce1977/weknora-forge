@@ -58,7 +58,7 @@ class WeKnoraClient:
         self._client = httpx.AsyncClient(
             base_url=upstream.api_base,
             timeout=httpx.Timeout(upstream.timeout_seconds, connect=10.0),
-            verify=upstream.verify_ssl,
+            verify=True,
             follow_redirects=False,
             transport=transport,
         )
@@ -197,7 +197,6 @@ class WeKnoraClient:
         "the key is rejected" apart from "WeKnora is unreachable".
         """
         upstream = self.config.upstream
-        auth = self.config.auth
         if not api_key:
             return False, "Missing WeKnora API key", 0
 
@@ -229,9 +228,12 @@ class WeKnoraClient:
             status = 502
             valid, msg = False, f"Upstream unreachable while validating the API key: {exc}"
 
-        if len(self._api_key_cache) > auth.api_key_cache_max_entries:
+        _CACHE_MAX = 5000
+        _POSITIVE_TTL = 300
+        _NEGATIVE_TTL = 30
+        if len(self._api_key_cache) > _CACHE_MAX:
             self._api_key_cache.clear()
-        ttl = auth.api_key_cache_ttl_seconds if valid else max(auth.api_key_negative_cache_ttl_seconds, 0)
+        ttl = _POSITIVE_TTL if valid else _NEGATIVE_TTL
         self._api_key_cache[cache_key] = (now + max(ttl, 1), valid, msg, status)
         return valid, msg, status
 
@@ -296,7 +298,7 @@ class WeKnoraClient:
         try:
             tag = await self.create_tag(kb_id, api_key, name, color, sort_order)
             return tag, "created"
-        except upstream_error:
+        except ForgeError:
             # The create was rejected, most likely because the tag already exists.
             # Resolve by querying rather than failing or silently duplicating.
             existing = await self.find_tag_by_name(kb_id, api_key, name)
@@ -384,10 +386,13 @@ class WeKnoraClient:
         content: str,
         status: str = "draft",
         tag_id: Optional[str] = None,
+        tag_ids: Optional[list[str]] = None,
         channel: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"title": title, "content": content, "status": status}
-        if tag_id:
+        if tag_ids:
+            payload["tag_ids"] = tag_ids
+        elif tag_id:
             payload["tag_id"] = tag_id
         if channel:
             payload["channel"] = channel

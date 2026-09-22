@@ -30,20 +30,20 @@ class PublishResult:
     def __init__(
         self,
         knowledge_id: Optional[str] = None,
-        tag_id: Optional[str] = None,
-        tag_name: Optional[str] = None,
+        tag_ids: Optional[list[str]] = None,
+        tag_names: Optional[list[str]] = None,
         parse_status: Optional[str] = None,
         enable_status: Optional[str] = None,
     ) -> None:
         self.knowledge_id = knowledge_id
-        self.tag_id = tag_id
-        self.tag_name = tag_name
+        self.tag_ids = tag_ids
+        self.tag_names = tag_names
         self.parse_status = parse_status
         self.enable_status = enable_status
 
     def as_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {"success": True}
-        for key in ("knowledge_id", "tag_id", "tag_name", "parse_status", "enable_status"):
+        for key in ("knowledge_id", "tag_ids", "tag_names", "parse_status", "enable_status"):
             value = getattr(self, key)
             if value is not None:
                 data[key] = value
@@ -59,32 +59,29 @@ class PublishService:
     async def publish(self, req: PublishRequest, api_key: str) -> PublishResult:
         settings = self.config.publish
         knowledge_id: Optional[str] = None
-        tag_id: Optional[str] = None
-        tag_name: Optional[str] = None
+        resolved_tag_ids: list[str] = []
+        resolved_tag_names: list[str] = []
 
         try:
             # ---------------- 2.1 tag resolution ----------------
-            if req.tag:
-                if req.tag.id:
-                    tag_id = req.tag.id
-                    tag_name = req.tag.name
-                elif req.tag.name:
+            if req.tag_names:
+                for name in req.tag_names:
+                    if not name:
+                        continue
                     tag, action = await self.client.ensure_tag(
                         req.kb_id,
                         api_key,
-                        req.tag.name,
-                        req.tag.color,
-                        req.tag.sort_order,
-                        req.tag.create_if_missing,
+                        name,
+                        create_if_missing=True,
                     )
                     if tag is None:
                         raise bad_request(
-                            f"Tag '{req.tag.name}' does not exist and create_if_missing=false",
+                            f"Tag '{name}' does not exist and create_if_missing=false",
                             error_id="TAG_NOT_FOUND",
                         )
-                    tag_id = tag.get("id")
-                    tag_name = tag.get("name")
-                    logger.debug("tag %s -> %s", req.tag.name, action)
+                    resolved_tag_ids.append(tag.get("id"))
+                    resolved_tag_names.append(tag.get("name"))
+                    logger.debug("tag %s -> %s", name, action)
 
             # ---------------- 2.1 draft article ----------------
             draft = await self.client.create_manual_knowledge(
@@ -93,7 +90,7 @@ class PublishService:
                 title=req.title,
                 content=req.content,
                 status="draft",
-                tag_id=tag_id,
+                tag_ids=resolved_tag_ids or None,
                 channel=req.channel or settings.default_channel,
             )
             knowledge_id = draft.get("id")
@@ -115,8 +112,8 @@ class PublishService:
 
             return PublishResult(
                 knowledge_id=knowledge_id,
-                tag_id=tag_id,
-                tag_name=tag_name,
+                tag_ids=resolved_tag_ids or None,
+                tag_names=resolved_tag_names or None,
                 parse_status=latest.get("parse_status"),
                 enable_status=latest.get("enable_status"),
             )

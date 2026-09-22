@@ -207,8 +207,10 @@ def test_probe_succeeds_when_weknora_reachable(build_app):
     resp = client.get("/api/v2/probe", headers=auth_headers("GET", "/api/v2/probe"))
     assert resp.status_code == 200
     body = resp.json()
-    assert body["success"] is True
-    assert body["data"]["knowledge_base_count"] == 1
+    assert body["success"] is False  # database not configured in test env
+    assert body["data"]["weknora"]["knowledge_base_count"] == 1
+    assert body["data"]["database"]["ok"] is False
+    assert body["data"]["database"]["message"] == "Database not configured"
     app.dependency_overrides.clear()
 
 
@@ -223,7 +225,7 @@ def test_probe_reports_failure_when_weknora_down(build_app):
     body = resp.json()
     assert body["success"] is False
     # a connection failure surfaces as a 502 from the upstream layer, never a 5xx
-    assert body["data"]["upstream_status"] == 502
+    assert body["data"]["weknora"]["upstream_status"] == 502
     app.dependency_overrides.clear()
 
 
@@ -234,20 +236,21 @@ def test_docs_and_openapi_are_served(build_app):
     docs = client.get("/docs")
     assert docs.status_code == 200
     assert "swagger-ui" in docs.text.lower() or "SwaggerUIBundle" in docs.text
-    schema = client.get("/openapi.json")
-    assert schema.status_code == 200
-    paths = schema.json()["paths"]
+    schema_resp = client.get("/openapi.json")
+    assert schema_resp.status_code == 200
+    schema_data = schema_resp.json()
+    paths = schema_data["paths"]
     assert "/api/v2/probe" in paths
     assert "/api/v2/publish" in paths
     assert "/api/v2/knowledge/search" in paths
     # v2 search now takes kb_ids (array), not kb_id
     search_post = paths["/api/v2/knowledge/search"]["post"]
-    schema = search_post["requestBody"]["content"]["application/json"]["schema"]
-    if "$ref" in schema:
-        ref = schema["$ref"].rsplit("/", 1)[-1]
-        props = schema_root["components"]["schemas"][ref]["properties"]
+    search_schema = search_post["requestBody"]["content"]["application/json"]["schema"]
+    if "$ref" in search_schema:
+        ref = search_schema["$ref"].rsplit("/", 1)[-1]
+        props = schema_data["components"]["schemas"][ref]["properties"]
     else:
-        props = schema["properties"]
+        props = search_schema["properties"]
     assert "kb_ids" in props
     assert "kb_id" not in props
     app.dependency_overrides.clear()

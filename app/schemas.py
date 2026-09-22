@@ -10,13 +10,6 @@ from pydantic import BaseModel, Field
 # --------------------------------------------------------------------------- #
 # Publish
 # --------------------------------------------------------------------------- #
-class TagSpec(BaseModel):
-    id: Optional[str] = None
-    name: Optional[str] = None
-    color: Optional[str] = None
-    sort_order: Optional[int] = None
-    create_if_missing: bool = True
-
 
 class PublishRequest(BaseModel):
     """Publish one article: draft -> custom metas -> publish.
@@ -26,10 +19,10 @@ class PublishRequest(BaseModel):
     """
 
     kb_id: str = Field(..., description="Knowledge base ID")
-    title: str = Field(..., description="Article title")
-    content: str = Field(..., description="Markdown body")
+    title: str = Field(..., min_length=1, max_length=200, description="Article title (max 200 chars)")
+    content: str = Field(..., min_length=1, max_length=10000, description="Markdown body (max 10000 chars)")
     description: Optional[str] = None
-    tag: Optional[TagSpec] = None
+    tag_names: Optional[List[str]] = Field(None, description="Tag names to attach, e.g. ['tech', 'ai']")
     custom_metas: Dict[str, Any] = Field(default_factory=dict, description="Custom metadata (custom_metadata)")
     channel: Optional[str] = Field(None, description="Source channel; defaults to publish.default_channel")
 
@@ -39,8 +32,8 @@ class PublishResponse(BaseModel):
 
     success: bool = True
     knowledge_id: Optional[str] = None
-    tag_id: Optional[str] = None
-    tag_name: Optional[str] = None
+    tag_ids: Optional[List[str]] = None
+    tag_names: Optional[List[str]] = None
     parse_status: Optional[str] = None
     enable_status: Optional[str] = None
 

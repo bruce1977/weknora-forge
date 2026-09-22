@@ -6,8 +6,7 @@ The deployment shape this module is written for::
     internal job  -------------------http------> forge
 
 Forge itself always speaks plain HTTP. Two facts therefore have to be reconstructed
-from headers - and only when the *immediate peer* is a proxy we trust
-(``proxy.trusted_proxies`` in config.json):
+from headers - and only when the *immediate peer* is a trusted proxy:
 
 1. **the request scheme.** Starlette builds absolute URLs - most visibly the 307
    trailing-slash redirect, and the Swagger UI links - from the scope scheme. Without
@@ -35,8 +34,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from fastapi import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .config import ProxyConfig
-
 # Scope keys - read them through the accessors below instead of hard-coding names.
 SCOPE_CLIENT_IP = "forge.client_ip"
 SCOPE_PEER_IP = "forge.peer_ip"
@@ -44,6 +41,10 @@ SCOPE_TRUSTED = "forge.trusted_peer"
 SCOPE_PROXY = "forge.proxy"
 
 _VALID_SCHEMES = {"http", "https", "ws", "wss"}
+
+# Hardcoded proxy defaults (formerly configurable via config.json proxy node)
+_TRUSTED_PROXIES = ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+_CLIENT_IP_HEADERS = ["cf-connecting-ip", "x-real-ip"]
 
 # Proxy / CDN bookkeeping headers. They are never forwarded verbatim to WeKnora:
 # Forge re-emits its own, so a public caller cannot forge the origin's view of the
@@ -150,13 +151,12 @@ class ProxyInfo:
 class ProxyHeadersMiddleware:
     """Rebuild scheme / client IP from forwarding headers of a trusted peer."""
 
-    def __init__(self, app: ASGIApp, config: Optional[ProxyConfig] = None) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.config = config or ProxyConfig()
-        self.trusted = TrustedProxies(self.config.trusted_proxies)
+        self.trusted = TrustedProxies(_TRUSTED_PROXIES)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] in ("http", "websocket") and self.config.enabled:
+        if scope["type"] in ("http", "websocket"):
             self._apply(scope)
         await self.app(scope, receive, send)
 
@@ -190,7 +190,7 @@ class ProxyHeadersMiddleware:
         scope[SCOPE_PROXY] = info
 
     def _resolve_client_ip(self, headers: Dict[str, str]) -> str:
-        for name in self.config.client_ip_headers:
+        for name in _CLIENT_IP_HEADERS:
             value = _first_value(headers.get(name.lower()))
             if value:
                 return value

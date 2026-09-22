@@ -9,7 +9,6 @@ from fastapi import Depends, Request
 from .config import Config, get_config
 from .errors import ForgeError, invalid_api_key, unauthorized, upstream_error
 from .logging import get_logger
-from .proxy import ProxyInfo, proxy_info
 from .security import Principal, authenticate, mask_secret
 from .services.db import Database
 from .upstream import WeKnoraClient
@@ -82,7 +81,7 @@ async def verify_v1(
 async def verify_v2(
     request: Request, config: Config = Depends(config_dep)
 ) -> Tuple[Principal, str]:
-    """v2 extensions: HMAC first, then validate the key against WeKnora (cached)."""
+    """v2 extensions: HMAC first, then validate the key upstream."""
     if config.auth.require_on_v2:
         principal, api_key = await authenticate(request, config.auth, config.upstream)
     else:

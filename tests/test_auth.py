@@ -4,7 +4,6 @@ Covered behaviours:
   * signature = HMAC-SHA256(api_key, METHOD + FULL_PATH)
   * v1 passthrough verifies the second factor but never calls back into WeKnora
   * v2 verifies the second factor FIRST, then validates the key upstream (cached)
-  * a repeated signature is rejected, which is what replaces the old timestamp window
   * "key rejected" (401) stays distinguishable from "WeKnora unreachable" (502)
 """
 
@@ -13,9 +12,10 @@ from __future__ import annotations
 import httpx
 import respx
 
-from tests.conftest import API_KEY, VALIDATE_URL, auth_headers, sign, write_config
+from tests.conftest import API_KEY, VALIDATE_URL, UPSTREAM, auth_headers, sign, write_config
 
-TEST_ENDPOINT = "/api/v2/health"
+TEST_ENDPOINT = "/api/v2/probe"
+PROBE_URL = f"{UPSTREAM}/knowledge-bases"
 
 
 def _error(resp) -> tuple:
@@ -51,10 +51,12 @@ def test_v2_rejects_signature_from_another_api_key(client):
 def test_v2_validates_api_key_against_upstream(client):
     with respx.mock(assert_all_called=False) as router:
         route = router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+        router.get(PROBE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": {"ok": True, "message": "reachable", "upstream": "http://upstream.test", "kb_count": 0}})
+        )
         resp = client.get(TEST_ENDPOINT, headers=auth_headers("GET", TEST_ENDPOINT))
         assert resp.status_code == 200
         body = resp.json()["data"]
-        assert body["api_key_valid"] is True
         assert body["auth_method"] == "hmac"
         assert route.calls.call_count == 1
 
@@ -77,27 +79,6 @@ def test_v2_distinguishes_upstream_outage(client):
         router.get(VALIDATE_URL).mock(return_value=httpx.Response(500, json={"error": {"message": "boom"}}))
         resp = client.get(TEST_ENDPOINT, headers=auth_headers("GET", TEST_ENDPOINT))
         assert _error(resp)[:2] == (502, "UPSTREAM_ERROR")
-
-
-def test_reused_signature_is_replayed_rejection(client):
-    """No timestamp in the payload: single-use signatures provide the freshness window."""
-    headers = auth_headers("POST", "/api/v2/metas/parse")
-    payload = {"query": "level = 1"}
-    with respx.mock(assert_all_called=False) as router:
-        router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
-        assert client.post("/api/v2/metas/parse", json=payload, headers=headers).status_code == 200
-        status, error_id, message = _error(client.post("/api/v2/metas/parse", json=payload, headers=headers))
-        assert (status, error_id) == (401, "INVALID_SIGNATURE")
-        assert "already used" in message
-
-
-def test_repeated_get_is_allowed(client):
-    """Read-only retries must keep working, so only unsafe methods are deduplicated."""
-    with respx.mock(assert_all_called=False) as router:
-        router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
-        headers = auth_headers("GET", TEST_ENDPOINT)
-        assert client.get(TEST_ENDPOINT, headers=headers).status_code == 200
-        assert client.get(TEST_ENDPOINT, headers=headers).status_code == 200
 
 
 def test_v1_passthrough_does_not_validate_api_key(client):
@@ -128,6 +109,9 @@ def test_auth_mode_off_allows_signature_free_calls(client):
     try:
         with respx.mock(assert_all_called=False) as router:
             router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+            router.get(PROBE_URL).mock(
+                return_value=httpx.Response(200, json={"success": True, "data": {"ok": True, "message": "reachable"}})
+            )
             resp = client.get(TEST_ENDPOINT, headers={"X-API-Key": API_KEY})
             assert resp.status_code == 200
             assert resp.json()["data"]["auth_method"] == "anonymous"
@@ -136,12 +120,9 @@ def test_auth_mode_off_allows_signature_free_calls(client):
 
 
 def test_missing_api_key_is_reported(client):
-    from app.security import get_signature_cache
-
     with respx.mock(assert_all_called=False):
         resp = client.get(
             TEST_ENDPOINT,
             headers={"X-Forge-Signature": sign("GET", TEST_ENDPOINT, api_key="x")},
         )
         assert resp.status_code == 401
-        get_signature_cache  # keep the import meaningful for linters

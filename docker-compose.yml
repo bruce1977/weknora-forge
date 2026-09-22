@@ -17,7 +17,7 @@ services:
       # compose file, use the service name instead: http://weknora:8080)
       WEKNORA_BASE_URL: ${WEKNORA_BASE_URL:-http://host.docker.internal:8080}
       # config.json lives in the image; mount your own to change it without a rebuild
-      FORGE_CONFIG: /app/config.json
+      FORGE_CONFIG: ${FORGE_CONFIG:-/data/config.json}
     volumes:
       - forge-data:/data
     extra_hosts:

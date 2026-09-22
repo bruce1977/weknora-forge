@@ -1,7 +1,8 @@
 """Configuration loading for WeKnora Forge.
 
-Forge is configured by ONE JSON file: ``config.json`` next to the application package
-(override the path with the ``FORGE_CONFIG`` environment variable).
+Forge is configured by ONE JSON file: ``data/config.json`` (production) or
+``config.json`` (legacy fallback).  Override the path with the ``FORGE_CONFIG``
+environment variable.
 
 Secrets never need to be written into that file: every ``${VAR}`` placeholder found in
 the file is expanded from the process environment at load time, with the optional
@@ -21,6 +22,7 @@ from urllib.parse import quote_plus
 from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_FILENAME = "config.json"
+DATA_CONFIG_FILENAME = "data/config.json"
 CONFIG_PATH_ENV = "FORGE_CONFIG"
 
 # ${VAR} and ${VAR:-default}
@@ -47,8 +49,12 @@ def default_config_path() -> Path:
     override = os.environ.get(CONFIG_PATH_ENV, "").strip()
     if override:
         return Path(override)
-    # <repo>/config.json  ->  app/config.py lives one level below the repo root
-    return Path(__file__).resolve().parent.parent / DEFAULT_CONFIG_FILENAME
+    repo_root = Path(__file__).resolve().parent.parent
+    # Prefer data/config.json (production), fall back to config.json (legacy)
+    data_path = repo_root / DATA_CONFIG_FILENAME
+    if data_path.exists():
+        return data_path
+    return repo_root / DEFAULT_CONFIG_FILENAME
 
 
 def is_identifier(value: str) -> bool:
@@ -62,7 +68,7 @@ def is_identifier(value: str) -> bool:
 class ServiceConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
-    log_level: str = "INFO"
+    log_level: str = "${LOG_LEVEL:-INFO}"
     workers: int = 1
 
 
@@ -87,42 +93,12 @@ class SwaggerConfig(BaseModel):
         return bool(v)
 
 
-class ProxyConfig(BaseModel):
-    """HTTPS is terminated in front of this service (Cloudflare, nginx, traefik...).
-
-    Forge listens on plain HTTP inside the private network; the public entry point is
-    HTTPS. Only requests arriving from a *trusted* peer may assert their own scheme /
-    client address through ``X-Forwarded-*`` - see ``app/proxy.py``.
-    """
-
-    enabled: bool = True
-    # "*" (trust anything) or a list of IPs / CIDRs / hostnames. Defaults cover the
-    # loopback and the private ranges a tunnel or sidecar container lives in.
-    trusted_proxies: List[str] = Field(
-        default_factory=lambda: [
-            "127.0.0.1",
-            "::1",
-            "10.0.0.0/8",
-            "172.16.0.0/12",
-            "192.168.0.0/16",
-        ]
-    )
-    # Checked in order; the first header carrying a value wins. Cloudflare overwrites
-    # CF-Connecting-IP on every request, so it is the most trustworthy source.
-    client_ip_headers: List[str] = Field(default_factory=lambda: ["cf-connecting-ip", "x-real-ip"])
-    # Re-emit X-Forwarded-For / -Proto / -Host towards WeKnora describing the caller
-    forward_client_info: bool = True
-
-
 class UpstreamConfig(BaseModel):
     """Native WeKnora instance."""
 
     base_url: str = "http://localhost:8080"
     api_prefix: str = "/api/v1"
     timeout_seconds: float = 60.0
-    verify_ssl: bool = True
-    # Optional server-held credential used when the caller sends no API key at all
-    default_api_key: str = ""
     # Endpoint used to validate a caller API key (cheap + always readable)
     api_key_validate_path: str = "/knowledge-bases?page=1&page_size=1"
     forward_request_id: bool = True
@@ -145,22 +121,6 @@ class AuthConfig(BaseModel):
 
     # The HMAC lives in a single header, X-Forge-Signature (see hmac_header_signature).
     hmac_header_signature: str = "X-Forge-Signature"
-
-    # There is no timestamp anymore: a signature is single-use for this TTL, which is
-    # what gives the request its short validity window.
-    signature_cache_ttl_seconds: int = 300
-    signature_cache_max_entries: int = 50000
-    # Only state-changing methods are deduplicated; repeating GET is legitimate.
-    signature_cache_methods: List[str] = Field(default_factory=lambda: ["POST", "PUT", "PATCH", "DELETE"])
-
-    # L1 check: validate the API key against upstream GET /api/v1/knowledge-bases
-    api_key_cache_ttl_seconds: int = 300
-    api_key_negative_cache_ttl_seconds: int = 30
-    api_key_cache_max_entries: int = 5000
-
-    @property
-    def signature_methods(self) -> set:
-        return {m.strip().upper() for m in self.signature_cache_methods if m.strip()}
 
 
 class PublishConfig(BaseModel):
@@ -312,7 +272,6 @@ class PurgeConfig(BaseModel):
 class Config(BaseModel):
     service: ServiceConfig = Field(default_factory=ServiceConfig)
     swagger: SwaggerConfig = Field(default_factory=SwaggerConfig)
-    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     upstream: UpstreamConfig = Field(default_factory=UpstreamConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
@@ -381,7 +340,6 @@ def config_template() -> Dict[str, Any]:
     purge = cfg.purge
     return {
         "service": cfg.service.model_dump(),
-        "proxy": cfg.proxy.model_dump(),
         "upstream": cfg.upstream.model_dump(),
         "auth": cfg.auth.model_dump(),
         "publish": cfg.publish.model_dump(),

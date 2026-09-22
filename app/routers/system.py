@@ -8,8 +8,12 @@ from fastapi import APIRouter, Depends, Request
 
 from .. import __version__
 from ..config import Config
-from ..deps import config_dep, get_client, verify_v2
+from ..deps import config_dep, get_client, get_db, verify_v2
+from ..logging import get_logger
+from ..proxy import proxy_info
 from ..security import Principal
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["v2-system"])
 health_router = APIRouter(tags=["system"])
@@ -34,19 +38,53 @@ async def health() -> dict:
     return {}
 
 
-@router.get("/probe", summary="Probe the configured WeKnora backend for connectivity")
+@router.get("/probe", summary="Probe WeKnora API and PostgreSQL database connectivity")
 async def probe(
     request: Request,
     auth: Tuple[Principal, str] = Depends(verify_v2),
     config: Config = Depends(config_dep),
 ) -> dict:
-    """Perform a live test request against the configured WeKnora (list its knowledge
-    bases). If the backend answers, the probe succeeds; any connection failure or
-    non-2xx response is reported as a failure rather than turning into a 5xx.
+    """Live connectivity check: test the WeKnora backend AND PostgreSQL database.
+
+    Returns a combined result so operators can see at a glance whether the full
+    stack is operational.
     """
+    import time
+
     _principal, api_key = auth
     client = get_client()
-    result = await client.probe(api_key)
-    ok = result.pop("ok")
-    result["auth_method"] = _principal.method
-    return {"success": ok, "data": result}
+
+    # --- WeKnora API ---
+    weknora_result = await client.probe(api_key)
+    weknora_ok = weknora_result.pop("ok", False)
+
+    # --- PostgreSQL database ---
+    db = get_db()
+    db_ok = False
+    db_message = "Database not configured"
+    db_latency_ms = 0.0
+    if db.configured:
+        db_start = time.time()
+        try:
+            db_ok = await db.ping()
+            db_latency_ms = round((time.time() - db_start) * 1000, 1)
+            db_message = "PostgreSQL is reachable" if db_ok else "PostgreSQL ping failed"
+        except Exception as exc:  # noqa: BLE001
+            db_latency_ms = round((time.time() - db_start) * 1000, 1)
+            db_message = f"PostgreSQL error: {exc}"
+            logger.warning("database probe failed: %s", exc)
+
+    overall_ok = weknora_ok and db_ok
+
+    return {
+        "success": overall_ok,
+        "data": {
+            "weknora": weknora_result,
+            "database": {
+                "ok": db_ok,
+                "message": db_message,
+                "latency_ms": db_latency_ms,
+            },
+            "auth_method": _principal.method,
+        },
+    }

@@ -21,16 +21,12 @@ BASE_CONFIG: Dict[str, Any] = {
         "base_url": "http://upstream.test",
         "api_prefix": "/api/v1",
         "timeout_seconds": 10,
-        "verify_ssl": False,
         "api_key_validate_path": "/knowledge-bases?page=1&page_size=1",
     },
     "auth": {
         "mode": "hmac",
         "require_on_v1": True,
         "require_on_v2": True,
-        "signature_cache_ttl_seconds": 300,
-        "api_key_cache_ttl_seconds": 300,
-        "api_key_negative_cache_ttl_seconds": 30,
     },
     "publish": {
         "wait": False,

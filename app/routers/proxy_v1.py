@@ -7,7 +7,6 @@ from typing import Dict, Tuple
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from ..config import Config
 from ..deps import get_client, verify_v1
 from ..logging import get_logger
 from ..proxy import forwarded_headers, is_proxy_header
@@ -38,12 +37,11 @@ def _is_stripped(name: str) -> bool:
     )
 
 
-def forward_headers(request: Request, api_key: str, config: Config) -> Dict[str, str]:
+def forward_headers(request: Request, api_key: str) -> Dict[str, str]:
     """Caller headers minus the stripped set, plus the credential and the client chain."""
     headers = {k: v for k, v in request.headers.items() if not _is_stripped(k)}
     headers["X-API-Key"] = api_key
-    if config.proxy.forward_client_info:
-        headers.update(forwarded_headers(request))
+    headers.update(forwarded_headers(request))
     return headers
 
 
@@ -60,7 +58,7 @@ def build_proxy_router(prefix: str, config: Config) -> APIRouter:
         client = get_client()
 
         body = await request.body()
-        headers = forward_headers(request, api_key, config)
+        headers = forward_headers(request, api_key)
 
         upstream = await client.raw(
             request.method,

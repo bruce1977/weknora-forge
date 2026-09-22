@@ -27,10 +27,10 @@ WeKnora 原生 API 的**扩展层**：在一层薄代理之上补齐原生能力
 ### Docker Compose
 
 ```bash
-cp .env.example .env          # 至少填 WEKNORA_BASE_URL 与 DB_*
+cp example.env .env            # 至少填 WEKNORA_BASE_URL 与 DB_*
 docker compose up -d --build
 curl http://localhost:8000/                        # 服务信息
-curl http://localhost:8000/api/v2/health           # 需签名，见第 4 节
+curl http://localhost:8000/api/v2/health           # 开放端点，无需签名
 ```
 
 ### 本地开发
@@ -46,7 +46,7 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 > 必须带 `--no-proxy-headers`：转发头由 `app/proxy.py` 统一处理，uvicorn 自己处理只看 127.0.0.1，
 > 会把容器/内网隧道来的 `X-Forwarded-*` 全部忽略（详见第 3 节）。
 
-测试：`python -m pytest tests -q`（**98 项**，上游用 respx 模拟，不需要真实 WeKnora 与数据库）。
+测试：`python -m pytest tests -q`（**92 项**，上游用 respx 模拟，不需要真实 WeKnora 与数据库）。
 
 ---
 
@@ -61,10 +61,10 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 | **v1 透传** | | | |
 | `ANY` | `/api/v1/{path}` | HMAC | 转发至 WeKnora |
 | **v2 系统** | | | |
-| `GET` | `/api/v2/health` | HMAC | 依赖健康检查 |
-| `GET` | `/api/v2/probe` | HMAC | WeKnora 连通性探针 |
+| `GET` | `/api/v2/health` | ✗ | 开放健康检查（返回 `{}`） |
+| `GET` | `/api/v2/probe` | HMAC | WeKnora + PostgreSQL 连通性探针 |
 | **v2 发布** | | | |
-| `POST` | `/api/v2/publish` | HMAC | 发布知识 |
+| `POST` | `/api/v2/publish` | HMAC | 发布知识（支持多标签） |
 | **v2 元数据搜索** | | | |
 | `POST` | `/api/v2/knowledge/search` | HMAC | 按元数据、标题、标签搜索 |
 | `POST` | `/api/v2/metas/parse` | HMAC | 解析 FMQ 表达式 |
@@ -72,7 +72,7 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 | **v2 维护** | | | |
 | `DELETE` | `/api/v2/management/purge` | HMAC | 清理软删除数据 |
 
-> **认证**: ✗ = 无认证, HMAC = 需要 `X-Forge-Signature` 头
+> **认证**: ✗ = 无认证, HMAC = 需要 `X-API-Key` + `X-Forge-Signature` 头
 
 ---
 
@@ -87,7 +87,7 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 ```JSON
 {
   "service": "weknora-forge",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "upstream": "http://localhost:8080",
   "v1_prefix": "/api/v1",
   "v2_prefix": "/api/v2",
@@ -120,47 +120,53 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
 
 #### `GET /api/v2/health` {#get-api-v2-health}
 
-检查上游 WeKnora 连通性和 PostgreSQL 数据库连通性。
+**开放端点，无需鉴权**。直接返回 `{}`，用于冷启动存活探针 / 负载均衡探活。
 
 **响应**
 
 ```JSON
-{
-  "status": "ok",
-  "upstream": "ok",
-  "database": "ok"
-}
+{}
 ```
 
 ---
 
 #### `GET /api/v2/probe` {#get-api-v2-probe}
 
-轻量级连通性探针，测试配置的 WeKnora 后端是否可达。执行实时测试请求（列出知识库）并返回结果，不会抛出异常。
+需要 HMAC 鉴权。测试 WeKnora 和 PostgreSQL 双重连通性。
 
 **响应（成功）**
 
 ```JSON
 {
   "success": true,
-  "data": {
+  "weknora": {
     "ok": true,
-    "auth_method": "hmac",
-    "bases": [...]
-  }
+    "knowledge_base_count": 4,
+    "latency_ms": 120.5
+  },
+  "database": {
+    "ok": true,
+    "latency_ms": 15.2
+  },
+  "auth_method": "hmac"
 }
 ```
 
-**响应（失败）**
+**响应（部分失败）**
 
 ```JSON
 {
   "success": false,
-  "data": {
+  "weknora": {
     "ok": false,
-    "auth_method": "hmac",
-    "error": "Connection refused"
-  }
+    "error": "Connection refused",
+    "upstream_status": 502
+  },
+  "database": {
+    "ok": true,
+    "latency_ms": 12.1
+  },
+  "auth_method": "hmac"
 }
 ```
 
@@ -177,27 +183,32 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 
 #### `POST /api/v2/publish` {#post-api-v2-publish}
 
-执行完整的发布编排：创建/获取标签 → 创建草稿 → 设置自定义元数据 → 发布。
+执行完整的发布编排：解析标签名 → 创建/获取标签 → 创建草稿 → 设置自定义元数据 → 发布。
 
 **请求**
+
+| 字段 | 类型 | 必填 | 限制 | 描述 |
+|------|------|------|------|------|
+| `kb_id` | string | ✓ | | 知识库 ID |
+| `title` | string | ✓ | 1-200 字符 | 文章标题 |
+| `content` | string | ✓ | 1-10000 字符 | Markdown 正文 |
+| `description` | string | | | 可选描述 |
+| `tag_names` | string[] | | | 标签名称数组，如 `["技术文档", "AI"]` |
+| `custom_metas` | object | | | 自定义元数据 |
+| `channel` | string | | 默认 `"api"` | 来源渠道 |
 
 ```JSON
 {
   "kb_id": "kb-00000001",
   "title": "Milvus 集群部署指南",
-  "content": "# Milvus 集群部署\n\n## 规划\n...",
+  "content": "# Milvus 集群部署\n\n## 规划\n...\n\n## 步骤\n...",
   "description": "可选描述",
-  "tag": {
-    "name": "技术文档",
-    "color": "#1890ff",
-    "create_if_missing": true
-  },
+  "tag_names": ["技术文档", "人工智能", "数据库"],
   "custom_metas": {
     "level": 3,
-    "category": "ops",
-    "tags": ["db", "ai"]
+    "category": "ops"
   },
-  "channel": "manual"
+  "channel": "api"
 }
 ```
 
@@ -207,8 +218,8 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 {
   "success": true,
   "knowledge_id": "k-00000001",
-  "tag_id": "t-00000001",
-  "status": "published"
+  "tag_ids": ["t-00000001", "t-00000002", "t-00000003"],
+  "tag_names": ["技术文档", "人工智能", "数据库"]
 }
 ```
 
@@ -355,26 +366,16 @@ Forge 监听 HTTP（默认端口 8000）。生产环境需在前面放反向代�
 
 ### 3.1 代理配置
 
-若 Forge 部署在反向代理后，需在 `config.json` 中启用代理感知：
-
-```JSON
-"proxy": {
-  "enabled": true,
-  "trusted_proxies": ["127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
-  "client_ip_headers": ["x-forwarded-for", "x-real-ip"],
-  "forward_client_info": true
-}
-```
-
-- `trusted_proxies`：反向代理的 IP/CIDR。只有这些对端可以设置 `X-Forwarded-*` 头。
-- `client_ip_headers`：按顺序读取真实客户端 IP 的头（第一个有效值胜出）。
-- `forward_client_info`：是否向 WeKnora 重建并转发 `X-Forwarded-For/Proto/Host`。
+反向代理感知已内置硬编码，无需配置。Forge 会自动：
+- 从 `X-Forwarded-For`、`X-Real-IP` 等头读取真实客户端 IP
+- 信任的代理范围：`127.0.0.1`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`::1`
+- 向 WeKnora 重建并转发 `X-Forwarded-For/Proto/Host`
 
 ### 3.2 验证部署
 
 ```bash
 curl http://localhost:8000/                        # 服务信息
-curl http://localhost:8000/api/v2/whoami  # 需 HMAC 签名
+curl http://localhost:8000/api/v2/health           # 开放，无需签名
 ```
 
 ---
@@ -396,13 +397,11 @@ signature = hex(HMAC_SHA256(api_key, payload))  # → X-Forge-Signature
 - 无时间戳、无 nonce、无 body 摘要：**API Key 就是签名密钥**，不需要再分发额外 secret。
 - `HTTP_FULL_PATH` = 原始 path + 原始 query（Forge 取 ASGI `raw_path`，**不做任何规范化/解码**，
   百分号编码原样参与签名）。
-- 新鲜度靠「一次性签名」实现，见 2.4。
-- 请求头：`X-API-Key`（也是签名密钥）、`X-Forge-Signature`（HMAC）。不再有独立的 `X-Forge-Key`
-  头，日志中的调用方标识由脱敏后的 API Key 派生。
+- 请求头：`X-API-Key`（也是签名密钥）、`X-Forge-Signature`（HMAC）。
 
 ```bash
 python scripts/hmac_request.py --base http://localhost:8000 --api-key sk-xxxxx \
-    GET /api/v2/whoami
+    GET /api/v2/probe
 
 # 只看签名头（复制进 curl / Postman / 定时任务）
 python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/management/purge?retention_days=30'
@@ -415,25 +414,21 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 
 ## 5. 配置
 
-**唯一配置源是 `config.json`**（用 `FORGE_CONFIG` 指向别处）。文件里的 `${VAR}` 与 `${VAR:-默认值}`
+**配置文件自动查找 `data/config.json`**（优先），回退到项目根目录 `config.json`。
+可用 `FORGE_CONFIG` 环境变量指定其他路径。文件里的 `${VAR}` 与 `${VAR:-默认值}`
 在加载时从环境变量展开，所以**密码/密钥不必写进文件**：
 
 ```jsonc
 {
   "service":  { "host": "0.0.0.0", "port": 8000, "log_level": "INFO", "workers": 1 },
   "swagger":  { "enabled": "${SWAGGER_ENABLED:-true}" },
-  "proxy":    { "enabled": true, "trusted_proxies": ["127.0.0.1", "172.16.0.0/12", "..."],
-                "client_ip_headers": ["cf-connecting-ip", "x-real-ip"], "forward_client_info": true },
   "upstream": { "base_url": "${WEKNORA_BASE_URL:-http://localhost:8080}", "api_prefix": "/api/v1",
-                "timeout_seconds": 60, "verify_ssl": true, "default_api_key": "${WEKNORA_DEFAULT_API_KEY:-}",
-                "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
+                "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
-                "hmac_header_signature": "X-Forge-Signature",
-                "signature_cache_ttl_seconds": 300, "signature_cache_max_entries": 50000,
-                "signature_cache_methods": ["POST", "PUT", "PATCH", "DELETE"],
-                "api_key_cache_ttl_seconds": 300, "api_key_negative_cache_ttl_seconds": 30 },
+                "hmac_header_signature": "X-Forge-Signature" },
   "publish":  { "wait": false, "wait_until": "enabled", "timeout_seconds": 90,
-                "poll_interval_seconds": 3.0, "merge_metas": true, "rollback_on_failure": true },
+                "poll_interval_seconds": 3.0, "default_channel": "api",
+                "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
                 "user": "${DB_USER:-postgres}", "password": "${DB_PASSWORD:-}", "name": "${DB_NAME:-WeKnora}",
                 "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "statement_timeout_ms": 30000 },
@@ -452,8 +447,6 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 - `swagger.enabled`：控制 Swagger UI 与 OpenAPI 文档的开关。设 `SWAGGER_ENABLED=false`
   （或 `0` / `no` / `off`）可彻底关闭 `GET /docs` 与 `GET /openapi.json`，便于生产环境隐藏接口文档。
   默认 `true`。UI 资源本地化内置（`app/static/swagger`，来自 `swagger-ui-dist@5.17.14`），无需任何外网 CDN 即可渲染。
-  每个受 HMAC 保护的 v2 接口都在「Try it out」里直接暴露可编辑的 `X-API-Key` 与 `X-Forge-Signature`
-  请求头，可不经全局 Authorize 弹窗直接在浏览器里调试。
 - `metas_search.extra_where` / `vector.similarity_expression` / `purge.tables` 是**服务端**配置，
   含 SQL 片段，绝不能暴露给调用方；表名列名只做标识符白名单校验。
 - `database.sslmode` 用 asyncpg 的取值（`disable|allow|prefer|require|verify-ca|verify-full`），
@@ -477,9 +470,9 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 ```
 app/
 ├── main.py                # 应用装配（中间件 + v1 透传 + v2 路由 + 生命周期）
-├── proxy.py               # 反向代理感知：scheme / 真实客户端 IP / 转发头重建
-├── config.py              # config.json 加载 + ${ENV} 展开
-├── security.py            # 二次验证（HMAC over METHOD + FULL_PATH）+ 一次性签名缓存
+├── proxy.py               # 反向代理感知：scheme / 真实客户端 IP / 转发头重建（硬编码）
+├── config.py              # config.json 加载 + ${ENV} 展开（自动查找 data/config.json）
+├── security.py            # 二次验证（HMAC over METHOD + FULL_PATH）
 ├── upstream.py            # WeKnora 客户端（透传、语义化调用、API Key 校验缓存）
 ├── deps.py / errors.py    # 依赖注入 / 错误信封
 ├── routers/               # proxy_v1 / publish / metas / maintenance / system
@@ -487,10 +480,11 @@ app/
     ├── db.py              # PostgreSQL 引擎与 Executor（含测试替身 FakeExecutor）
     ├── meta_dsl.py        # FMQ 词法 + 语法 + 求值 + jsonb SQL 下推
     ├── metas_search.py    # 元数据检索（SQL 组装、分页、向量评分）
-    ├── publish_service.py # 发布编排（标签 → 草稿 → 元数据 → 发布 → 可选等待）
+    ├── publish_service.py # 发布编排（tags → 草稿 → 元数据 → 发布 → 可选等待）
     └── purge_service.py   # 物理清理（级联删除 + 孤儿清理）
 scripts/                   # hmac_request.py（签名请求助手）/ show_config.py
-tests/                     # 98 项，respx 模拟上游
+tests/                     # 92 项，respx 模拟上游
+data/                      # 运行时数据（config.json、.keys 等）
 ```
 
 ---

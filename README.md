@@ -28,10 +28,10 @@ What the native API lacks, and how Forge covers it:
 ### Docker Compose
 
 ```bash
-cp .env.example .env          # at minimum WEKNORA_BASE_URL and the DB_* values
+cp example.env .env            # at minimum WEKNORA_BASE_URL and the DB_* values
 docker compose up -d --build
 curl http://localhost:8000/                        # service info
-curl http://localhost:8000/api/v2/health           # signed, see chapter 3
+curl http://localhost:8000/api/v2/health           # open endpoint, no auth required
 ```
 
 ### Local development
@@ -48,7 +48,7 @@ python scripts/show_config.py                       # effective config, secrets 
 > Uvicorn's own handling only trusts 127.0.0.1, so it would silently ignore `X-Forwarded-*`
 > coming from a container or tunnel (see chapter 2).
 
-Tests: `python -m pytest tests -q` (**98 tests**, upstream mocked with respx - no real
+Tests: `python -m pytest tests -q` (**92 tests**, upstream mocked with respx - no real
 WeKnora instance and no database required).
 
 ---
@@ -64,10 +64,10 @@ WeKnora instance and no database required).
 | **v1 Passthrough** | | | |
 | `ANY` | `/api/v1/{path}` | HMAC | Forward to WeKnora |
 | **v2 System** | | | |
-| `GET` | `/api/v2/health` | HMAC | Dependency health |
-| `GET` | `/api/v2/probe` | HMAC | WeKnora connectivity probe |
+| `GET` | `/api/v2/health` | ✗ | Open health check (returns `{}`) |
+| `GET` | `/api/v2/probe` | HMAC | WeKnora + PostgreSQL connectivity probe |
 | **v2 Publish** | | | |
-| `POST` | `/api/v2/publish` | HMAC | Publish knowledge |
+| `POST` | `/api/v2/publish` | HMAC | Publish knowledge (multi-tag support) |
 | **v2 Metadata Search** | | | |
 | `POST` | `/api/v2/knowledge/search` | HMAC | Search by metadata, title, tags |
 | `POST` | `/api/v2/metas/parse` | HMAC | Parse FMQ expression |
@@ -75,7 +75,7 @@ WeKnora instance and no database required).
 | **v2 Maintenance** | | | |
 | `DELETE` | `/api/v2/management/purge` | HMAC | Purge soft-deleted data |
 
-> **Auth**: ✗ = No authentication, HMAC = Requires `X-Forge-Signature` header
+> **Auth**: ✗ = No authentication, HMAC = Requires `X-API-Key` + `X-Forge-Signature` headers
 
 ---
 
@@ -90,7 +90,7 @@ Returns service information including upstream address, v1/v2 prefixes, and auth
 ```JSON
 {
   "service": "weknora-forge",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "upstream": "http://localhost:8080",
   "v1_prefix": "/api/v1",
   "v2_prefix": "/api/v2",
@@ -123,47 +123,53 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
 
 #### `GET /api/v2/health` {#get-api-v2-health}
 
-Checks upstream WeKnora connectivity and PostgreSQL database connectivity.
+**Open endpoint, no auth required**. Returns `{}` directly. Used for liveness probes / load balancer health checks.
 
 **Response**
 
 ```JSON
-{
-  "status": "ok",
-  "upstream": "ok",
-  "database": "ok"
-}
+{}
 ```
 
 ---
 
 #### `GET /api/v2/probe` {#get-api-v2-probe}
 
-Lightweight connectivity probe that tests if the configured WeKnora backend is reachable. Performs a live test request (list knowledge bases) and returns the result without raising exceptions.
+Requires HMAC auth. Tests both WeKnora and PostgreSQL connectivity.
 
 **Response (success)**
 
 ```JSON
 {
   "success": true,
-  "data": {
+  "weknora": {
     "ok": true,
-    "auth_method": "hmac",
-    "bases": [...]
-  }
+    "knowledge_base_count": 4,
+    "latency_ms": 120.5
+  },
+  "database": {
+    "ok": true,
+    "latency_ms": 15.2
+  },
+  "auth_method": "hmac"
 }
 ```
 
-**Response (failure)**
+**Response (partial failure)**
 
 ```JSON
 {
   "success": false,
-  "data": {
+  "weknora": {
     "ok": false,
-    "auth_method": "hmac",
-    "error": "Connection refused"
-  }
+    "error": "Connection refused",
+    "upstream_status": 502
+  },
+  "database": {
+    "ok": true,
+    "latency_ms": 12.1
+  },
+  "auth_method": "hmac"
 }
 ```
 
@@ -180,27 +186,32 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 
 #### `POST /api/v2/publish` {#post-api-v2-publish}
 
-Executes the full publish orchestration: create/get tag → create draft → set custom metadata → publish.
+Executes the full publish orchestration: resolve tag names → create/get tags → create draft → set custom metadata → publish.
 
 **Request**
+
+| Field | Type | Required | Limit | Description |
+|-------|------|----------|-------|-------------|
+| `kb_id` | string | ✓ | | Knowledge base ID |
+| `title` | string | ✓ | 1-200 chars | Article title |
+| `content` | string | ✓ | 1-10000 chars | Markdown body |
+| `description` | string | | | Optional description |
+| `tag_names` | string[] | | | Tag name array, e.g. `["docs", "ai"]` |
+| `custom_metas` | object | | | Custom metadata |
+| `channel` | string | | default `"api"` | Source channel |
 
 ```JSON
 {
   "kb_id": "kb-00000001",
   "title": "Milvus cluster deployment guide",
-  "content": "# Milvus\n\n## Planning\n...",
+  "content": "# Milvus cluster deployment\n\n## Planning\n...\n\n## Steps\n...",
   "description": "Optional description",
-  "tag": {
-    "name": "docs",
-    "color": "#1890ff",
-    "create_if_missing": true
-  },
+  "tag_names": ["docs", "ai", "database"],
   "custom_metas": {
     "level": 3,
-    "category": "ops",
-    "tags": ["db", "ai"]
+    "category": "ops"
   },
-  "channel": "manual"
+  "channel": "api"
 }
 ```
 
@@ -210,8 +221,8 @@ Executes the full publish orchestration: create/get tag → create draft → set
 {
   "success": true,
   "knowledge_id": "k-00000001",
-  "tag_id": "t-00000001",
-  "status": "published"
+  "tag_ids": ["t-00000001", "t-00000002", "t-00000003"],
+  "tag_names": ["docs", "ai", "database"]
 }
 ```
 
@@ -345,7 +356,7 @@ Purges soft-deleted data based on retention days. Executes cascade delete in tab
 }
 ```
 
-> ⚠️ Always check with `dry_run=true` first. `purge` is a long-running call - invoke from internal network.
+> Always check with `dry_run=true` first. `purge` is a long-running call - invoke from internal network.
 
 ---
 
@@ -359,26 +370,16 @@ client ──HTTPS──► reverse proxy ──HTTP──► Forge:8000 ──H
 
 ### 3.1 Proxy configuration
 
-If Forge sits behind a reverse proxy, enable proxy awareness in `config.json`:
-
-```JSON
-"proxy": {
-  "enabled": true,
-  "trusted_proxies": ["127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
-  "client_ip_headers": ["x-forwarded-for", "x-real-ip"],
-  "forward_client_info": true
-}
-```
-
-- `trusted_proxies`: IPs/CIDRs of your reverse proxy(s). Only these peers can set `X-Forwarded-*` headers.
-- `client_ip_headers`: headers to read the real client IP from (first valid wins).
-- `forward_client_info`: rebuild and forward `X-Forwarded-For/Proto/Host` to WeKnora.
+Reverse proxy awareness is built-in and hardcoded. Forge automatically:
+- Reads real client IP from `X-Forwarded-For`, `X-Real-IP` etc.
+- Trusted proxy ranges: `127.0.0.1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `::1`
+- Rebuilds and forwards `X-Forwarded-For/Proto/Host` to WeKnora
 
 ### 3.2 Verify deployment
 
 ```bash
 curl http://localhost:8000/                        # service info
-curl http://localhost:8000/api/v2/whoami  # requires HMAC signature
+curl http://localhost:8000/api/v2/health           # open, no auth required
 ```
 
 ---
@@ -401,13 +402,11 @@ signature = hex(HMAC_SHA256(api_key, payload))  # -> X-Forge-Signature
   secret has to be distributed.
 - `HTTP_FULL_PATH` is the raw path plus the raw query string. Forge signs the ASGI `raw_path`
   and performs **no normalisation and no decoding**: percent-encoding is part of the signature.
-- Freshness comes from single-use signatures, see 2.4.
-- Headers: `X-API-Key` (also the signing key) and `X-Forge-Signature` (the HMAC). There is no
-  separate `X-Forge-Key` header - the caller identity in logs is derived from the masked key.
+- Headers: `X-API-Key` (also the signing key) and `X-Forge-Signature` (the HMAC).
 
 ```bash
 python scripts/hmac_request.py --base http://localhost:8000 --api-key sk-xxxxx \
-    GET /api/v2/whoami
+    GET /api/v2/probe
 
 # print the headers only (paste into curl / Postman / a job runner)
 python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/management/purge?retention_days=30'
@@ -454,26 +453,22 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 
 ## 5. Configuration
 
-**`config.json` is the single source of truth** (point `FORGE_CONFIG` elsewhere if needed). Every
-`${VAR}` / `${VAR:-default}` placeholder in it is expanded from the process environment at load
-time, so secrets never have to be written into the file:
+**Config file auto-detection: `data/config.json`** (preferred), fallback to project root `config.json`.
+Override with `FORGE_CONFIG` environment variable. Every `${VAR}` / `${VAR:-default}` placeholder
+in it is expanded from the process environment at load time, so secrets never have to be written
+into the file:
 
 ```jsonc
 {
   "service":  { "host": "0.0.0.0", "port": 8000, "log_level": "INFO", "workers": 1 },
   "swagger":  { "enabled": "${SWAGGER_ENABLED:-true}" },
-  "proxy":    { "enabled": true, "trusted_proxies": ["127.0.0.1", "172.16.0.0/12", "..."],
-                "client_ip_headers": ["cf-connecting-ip", "x-real-ip"], "forward_client_info": true },
   "upstream": { "base_url": "${WEKNORA_BASE_URL:-http://localhost:8080}", "api_prefix": "/api/v1",
-                "timeout_seconds": 60, "verify_ssl": true, "default_api_key": "${WEKNORA_DEFAULT_API_KEY:-}",
-                "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
+                "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
-                "hmac_header_signature": "X-Forge-Signature",
-                "signature_cache_ttl_seconds": 300, "signature_cache_max_entries": 50000,
-                "signature_cache_methods": ["POST", "PUT", "PATCH", "DELETE"],
-                "api_key_cache_ttl_seconds": 300, "api_key_negative_cache_ttl_seconds": 30 },
+                "hmac_header_signature": "X-Forge-Signature" },
   "publish":  { "wait": false, "wait_until": "enabled", "timeout_seconds": 90,
-                "poll_interval_seconds": 3.0, "merge_metas": true, "rollback_on_failure": true },
+                "poll_interval_seconds": 3.0, "default_channel": "api",
+                "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
                 "user": "${DB_USER:-postgres}", "password": "${DB_PASSWORD:-}", "name": "${DB_NAME:-WeKnora}",
                 "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "statement_timeout_ms": 30000 },
@@ -492,9 +487,7 @@ Notes:
 - `swagger.enabled`: controls the Swagger UI and OpenAPI spec. Set `SWAGGER_ENABLED=false`
   (or `0` / `no` / `off`) to fully disable `GET /docs` and `GET /openapi.json` - useful in
   production. Defaults to `true`. The UI is vendored locally (`app/static/swagger`, from
-  `swagger-ui-dist@5.17.14`) so it renders without any external CDN. Each secured v2 operation
-  exposes `X-API-Key` and `X-Forge-Signature` as editable request headers in "Try it out", so the
-  API can be debugged directly from the browser without the global Authorize popup.
+  `swagger-ui-dist@5.17.14`) so it renders without any external CDN.
 - `metas_search.extra_where`, `vector.similarity_expression` and `purge.tables` are **server-side**
   settings containing SQL fragments - never expose them to callers. Table/column names are validated
   against an identifier whitelist.
@@ -520,9 +513,9 @@ Common `error_id` values: `INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZE
 ```
 app/
 ├── main.py                # wiring (middleware + v1 passthrough + v2 routers + lifespan)
-├── proxy.py               # reverse-proxy awareness: scheme / client IP / forwarded headers
-├── config.py              # config.json loading + ${ENV} expansion
-├── security.py            # second factor (HMAC over METHOD + FULL_PATH) + single-use cache
+├── proxy.py               # reverse-proxy awareness: scheme / client IP / forwarded headers (hardcoded)
+├── config.py              # config.json loading + ${ENV} expansion (auto-detects data/config.json)
+├── security.py            # second factor (HMAC over METHOD + FULL_PATH)
 ├── upstream.py            # WeKnora client (passthrough, semantic calls, API key cache)
 ├── deps.py / errors.py    # dependency wiring / error envelope
 ├── routers/               # proxy_v1 / publish / metas / maintenance / system
@@ -530,10 +523,11 @@ app/
     ├── db.py              # PostgreSQL engine and Executor (FakeExecutor for tests)
     ├── meta_dsl.py        # FMQ lexer + parser + evaluator + jsonb SQL pushdown
     ├── metas_search.py    # metadata search (SQL assembly, paging, vector scoring)
-    ├── publish_service.py # publish orchestration (tag -> draft -> metas -> publish -> optional wait)
+    ├── publish_service.py # publish orchestration (tags -> draft -> metas -> publish -> optional wait)
     └── purge_service.py   # physical purge (cascade delete + orphan sweep)
 scripts/                   # hmac_request.py (signed request helper) / show_config.py
-tests/                     # 98 tests, upstream mocked with respx
+tests/                     # 92 tests, upstream mocked with respx
+data/                      # runtime data (config.json, etc.)
 ```
 
 ---
