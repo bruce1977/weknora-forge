@@ -30,7 +30,7 @@ What the native API lacks, and how Forge covers it:
 ```bash
 cp .env.example .env          # at minimum WEKNORA_BASE_URL and the DB_* values
 docker compose up -d --build
-curl http://localhost:8000/healthz                 # {"status":"ok",...}
+curl http://localhost:8000/                        # service info
 curl http://localhost:8000/api/v2/health           # signed, see chapter 3
 ```
 
@@ -60,12 +60,12 @@ WeKnora instance and no database required).
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | **System** | | | |
-| `GET` | `/healthz` | ✗ | Health check |
 | `GET` | `/` | ✗ | Service info |
 | **v1 Passthrough** | | | |
 | `ANY` | `/api/v1/{path}` | HMAC | Forward to WeKnora |
 | **v2 System** | | | |
 | `GET` | `/api/v2/health` | HMAC | Dependency health |
+| `GET` | `/api/v2/probe` | HMAC | WeKnora connectivity probe |
 | **v2 Publish** | | | |
 | `POST` | `/api/v2/publish` | HMAC | Publish knowledge |
 | **v2 Metadata Search** | | | |
@@ -80,22 +80,6 @@ WeKnora instance and no database required).
 ---
 
 ### 2.1 System Endpoints
-
-#### `GET /healthz` {#get-healthz}
-
-Health check endpoint. Returns service status, name and version. No authentication required.
-
-**Response**
-
-```JSON
-{
-  "status": "ok",
-  "name": "weknora-forge",
-  "version": "1.0.0"
-}
-```
-
----
 
 #### `GET /` {#get-root}
 
@@ -149,6 +133,45 @@ Checks upstream WeKnora connectivity and PostgreSQL database connectivity.
   "upstream": "ok",
   "database": "ok"
 }
+```
+
+---
+
+#### `GET /api/v2/probe` {#get-api-v2-probe}
+
+Lightweight connectivity probe that tests if the configured WeKnora backend is reachable. Performs a live test request (list knowledge bases) and returns the result without raising exceptions.
+
+**Response (success)**
+
+```JSON
+{
+  "success": true,
+  "data": {
+    "ok": true,
+    "auth_method": "hmac",
+    "bases": [...]
+  }
+}
+```
+
+**Response (failure)**
+
+```JSON
+{
+  "success": false,
+  "data": {
+    "ok": false,
+    "auth_method": "hmac",
+    "error": "Connection refused"
+  }
+}
+```
+
+**Generate HMAC signature:**
+
+```bash
+python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
+    --api-key sk-xxxxx --curl
 ```
 
 ---
@@ -354,7 +377,7 @@ If Forge sits behind a reverse proxy, enable proxy awareness in `config.json`:
 ### 3.2 Verify deployment
 
 ```bash
-curl http://localhost:8000/healthz
+curl http://localhost:8000/                        # service info
 curl http://localhost:8000/api/v2/whoami  # requires HMAC signature
 ```
 
@@ -379,8 +402,8 @@ signature = hex(HMAC_SHA256(api_key, payload))  # -> X-Forge-Signature
 - `HTTP_FULL_PATH` is the raw path plus the raw query string. Forge signs the ASGI `raw_path`
   and performs **no normalisation and no decoding**: percent-encoding is part of the signature.
 - Freshness comes from single-use signatures, see 2.4.
-- Headers: `X-API-Key` (also the signing key) and `X-Forge-Signature`; `X-Forge-Key` is an
-  optional human-readable label used in logs.
+- Headers: `X-API-Key` (also the signing key) and `X-Forge-Signature` (the HMAC). There is no
+  separate `X-Forge-Key` header - the caller identity in logs is derived from the masked key.
 
 ```bash
 python scripts/hmac_request.py --base http://localhost:8000 --api-key sk-xxxxx \
@@ -393,6 +416,40 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 # config.json -> auth.mode = "off"
 ```
 
+### 4.2 Signature generation script
+
+The `scripts/gen_forge_signature.py` script generates `X-Forge-Signature` headers for testing or integrating with external tools (Postman, job runners, etc.).
+
+**Basic usage:**
+
+```bash
+# Generate signature for a POST request
+python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
+    --api-key sk-xxxxx
+
+# Include a query string
+python scripts/gen_forge_signature.py --method GET \
+    --path /api/v2/knowledge/search --query "metas_query=level%20%3E%3D%203" \
+    --api-key sk-xxxxx --curl
+
+# Generate a ready-to-run curl command with JSON body
+python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
+    --api-key sk-xxxxx --curl --json '{"kb_id":"kb-1"}'
+```
+
+**Parameters:**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `--method` | Yes | HTTP method (GET, POST, PUT, PATCH, DELETE) |
+| `--path` | Yes | Request path starting with `/` (include query string or use `--query`) |
+| `--api-key` | Yes | Your WeKnora API key (also used as the HMAC signing key) |
+| `--query` | No | Raw query string without the leading `?` |
+| `--json` | No | JSON body string, or `@file` to read from a file (only printed with `--curl`) |
+| `--curl` | No | Output a complete curl command with signed headers |
+
+> **Note:** For state-changing methods (POST/PUT/PATCH/DELETE), generate a fresh signature for each request. GET signatures may be reused.
+
 ---
 
 ## 5. Configuration
@@ -404,13 +461,14 @@ time, so secrets never have to be written into the file:
 ```jsonc
 {
   "service":  { "host": "0.0.0.0", "port": 8000, "log_level": "INFO", "workers": 1 },
+  "swagger":  { "enabled": "${SWAGGER_ENABLED:-true}" },
   "proxy":    { "enabled": true, "trusted_proxies": ["127.0.0.1", "172.16.0.0/12", "..."],
                 "client_ip_headers": ["cf-connecting-ip", "x-real-ip"], "forward_client_info": true },
   "upstream": { "base_url": "${WEKNORA_BASE_URL:-http://localhost:8080}", "api_prefix": "/api/v1",
                 "timeout_seconds": 60, "verify_ssl": true, "default_api_key": "${WEKNORA_DEFAULT_API_KEY:-}",
                 "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
-                "hmac_header_key": "X-Forge-Key", "hmac_header_signature": "X-Forge-Signature",
+                "hmac_header_signature": "X-Forge-Signature",
                 "signature_cache_ttl_seconds": 300, "signature_cache_max_entries": 50000,
                 "signature_cache_methods": ["POST", "PUT", "PATCH", "DELETE"],
                 "api_key_cache_ttl_seconds": 300, "api_key_negative_cache_ttl_seconds": 30 },
@@ -431,6 +489,12 @@ time, so secrets never have to be written into the file:
 Notes:
 
 - `auth.mode`: `hmac` or `off` (use `off` only on a fully trusted internal network).
+- `swagger.enabled`: controls the Swagger UI and OpenAPI spec. Set `SWAGGER_ENABLED=false`
+  (or `0` / `no` / `off`) to fully disable `GET /docs` and `GET /openapi.json` - useful in
+  production. Defaults to `true`. The UI is vendored locally (`app/static/swagger`, from
+  `swagger-ui-dist@5.17.14`) so it renders without any external CDN. Each secured v2 operation
+  exposes `X-API-Key` and `X-Forge-Signature` as editable request headers in "Try it out", so the
+  API can be debugged directly from the browser without the global Authorize popup.
 - `metas_search.extra_where`, `vector.similarity_expression` and `purge.tables` are **server-side**
   settings containing SQL fragments - never expose them to callers. Table/column names are validated
   against an identifier whitelist.

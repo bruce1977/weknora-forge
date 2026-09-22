@@ -29,7 +29,7 @@ WeKnora 原生 API 的**扩展层**：在一层薄代理之上补齐原生能力
 ```bash
 cp .env.example .env          # 至少填 WEKNORA_BASE_URL 与 DB_*
 docker compose up -d --build
-curl http://localhost:8000/healthz                 # {"status":"ok",...}
+curl http://localhost:8000/                        # 服务信息
 curl http://localhost:8000/api/v2/health           # 需签名，见第 4 节
 ```
 
@@ -57,12 +57,12 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 | 方法 | 路径 | 认证 | 描述 |
 |------|------|------|------|
 | **系统** | | | |
-| `GET` | `/healthz` | ✗ | 健康检查 |
 | `GET` | `/` | ✗ | 服务信息 |
 | **v1 透传** | | | |
 | `ANY` | `/api/v1/{path}` | HMAC | 转发至 WeKnora |
 | **v2 系统** | | | |
 | `GET` | `/api/v2/health` | HMAC | 依赖健康检查 |
+| `GET` | `/api/v2/probe` | HMAC | WeKnora 连通性探针 |
 | **v2 发布** | | | |
 | `POST` | `/api/v2/publish` | HMAC | 发布知识 |
 | **v2 元数据搜索** | | | |
@@ -77,22 +77,6 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 ---
 
 ### 2.1 系统端点
-
-#### `GET /healthz` {#get-healthz}
-
-健康检查端点。返回服务状态、名称和版本。无需认证。
-
-**响应**
-
-```JSON
-{
-  "status": "ok",
-  "name": "weknora-forge",
-  "version": "1.0.0"
-}
-```
-
----
 
 #### `GET /` {#get-root}
 
@@ -146,6 +130,45 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
   "upstream": "ok",
   "database": "ok"
 }
+```
+
+---
+
+#### `GET /api/v2/probe` {#get-api-v2-probe}
+
+轻量级连通性探针，测试配置的 WeKnora 后端是否可达。执行实时测试请求（列出知识库）并返回结果，不会抛出异常。
+
+**响应（成功）**
+
+```JSON
+{
+  "success": true,
+  "data": {
+    "ok": true,
+    "auth_method": "hmac",
+    "bases": [...]
+  }
+}
+```
+
+**响应（失败）**
+
+```JSON
+{
+  "success": false,
+  "data": {
+    "ok": false,
+    "auth_method": "hmac",
+    "error": "Connection refused"
+  }
+}
+```
+
+**生成 HMAC 签名：**
+
+```bash
+python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
+    --api-key sk-xxxxx --curl
 ```
 
 ---
@@ -350,7 +373,7 @@ Forge 监听 HTTP（默认端口 8000）。生产环境需在前面放反向代�
 ### 3.2 验证部署
 
 ```bash
-curl http://localhost:8000/healthz
+curl http://localhost:8000/                        # 服务信息
 curl http://localhost:8000/api/v2/whoami  # 需 HMAC 签名
 ```
 
@@ -374,7 +397,8 @@ signature = hex(HMAC_SHA256(api_key, payload))  # → X-Forge-Signature
 - `HTTP_FULL_PATH` = 原始 path + 原始 query（Forge 取 ASGI `raw_path`，**不做任何规范化/解码**，
   百分号编码原样参与签名）。
 - 新鲜度靠「一次性签名」实现，见 2.4。
-- 请求头：`X-API-Key`（也是签名密钥）、`X-Forge-Signature`；`X-Forge-Key` 可选，仅用于日志标识。
+- 请求头：`X-API-Key`（也是签名密钥）、`X-Forge-Signature`（HMAC）。不再有独立的 `X-Forge-Key`
+  头，日志中的调用方标识由脱敏后的 API Key 派生。
 
 ```bash
 python scripts/hmac_request.py --base http://localhost:8000 --api-key sk-xxxxx \
@@ -397,13 +421,14 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 ```jsonc
 {
   "service":  { "host": "0.0.0.0", "port": 8000, "log_level": "INFO", "workers": 1 },
+  "swagger":  { "enabled": "${SWAGGER_ENABLED:-true}" },
   "proxy":    { "enabled": true, "trusted_proxies": ["127.0.0.1", "172.16.0.0/12", "..."],
                 "client_ip_headers": ["cf-connecting-ip", "x-real-ip"], "forward_client_info": true },
   "upstream": { "base_url": "${WEKNORA_BASE_URL:-http://localhost:8080}", "api_prefix": "/api/v1",
                 "timeout_seconds": 60, "verify_ssl": true, "default_api_key": "${WEKNORA_DEFAULT_API_KEY:-}",
                 "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
-                "hmac_header_key": "X-Forge-Key", "hmac_header_signature": "X-Forge-Signature",
+                "hmac_header_signature": "X-Forge-Signature",
                 "signature_cache_ttl_seconds": 300, "signature_cache_max_entries": 50000,
                 "signature_cache_methods": ["POST", "PUT", "PATCH", "DELETE"],
                 "api_key_cache_ttl_seconds": 300, "api_key_negative_cache_ttl_seconds": 30 },
@@ -424,6 +449,11 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 要点：
 
 - `auth.mode`：`hmac` | `off`（`off` 只建议用于完全可信的内网）。
+- `swagger.enabled`：控制 Swagger UI 与 OpenAPI 文档的开关。设 `SWAGGER_ENABLED=false`
+  （或 `0` / `no` / `off`）可彻底关闭 `GET /docs` 与 `GET /openapi.json`，便于生产环境隐藏接口文档。
+  默认 `true`。UI 资源本地化内置（`app/static/swagger`，来自 `swagger-ui-dist@5.17.14`），无需任何外网 CDN 即可渲染。
+  每个受 HMAC 保护的 v2 接口都在「Try it out」里直接暴露可编辑的 `X-API-Key` 与 `X-Forge-Signature`
+  请求头，可不经全局 Authorize 弹窗直接在浏览器里调试。
 - `metas_search.extra_where` / `vector.similarity_expression` / `purge.tables` 是**服务端**配置，
   含 SQL 片段，绝不能暴露给调用方；表名列名只做标识符白名单校验。
 - `database.sslmode` 用 asyncpg 的取值（`disable|allow|prefer|require|verify-ca|verify-full`），

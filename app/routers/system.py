@@ -8,18 +8,11 @@ from fastapi import APIRouter, Depends, Request
 
 from .. import __version__
 from ..config import Config
-from ..deps import config_dep, get_db, verify_v2
-from ..proxy import proxy_info
-from ..services.db import Database
+from ..deps import config_dep, get_client, verify_v2
 from ..security import Principal
 
 router = APIRouter(tags=["v2-system"])
 health_router = APIRouter(tags=["system"])
-
-
-@health_router.get("/healthz", summary="Health check (no auth required)")
-async def healthz() -> dict:
-    return {"status": "ok", "service": "weknora-forge", "version": __version__}
 
 
 @health_router.get("/", summary="Service information")
@@ -34,35 +27,26 @@ async def root(config: Config = Depends(config_dep)) -> dict:
     }
 
 
-@router.get("/health", summary="Dependency health (WeKnora + PostgreSQL)")
-async def health(
+@router.get("/health", summary="Lightweight liveness check (no auth, no resource access)")
+async def health() -> dict:
+    # Intentionally open and dependency-free: a cold liveness probe that must not touch
+    # WeKnora, PostgreSQL or any other resource so it stays fast and always answers.
+    return {}
+
+
+@router.get("/probe", summary="Probe the configured WeKnora backend for connectivity")
+async def probe(
     request: Request,
     auth: Tuple[Principal, str] = Depends(verify_v2),
     config: Config = Depends(config_dep),
-    db: Database = Depends(get_db),
 ) -> dict:
-    database_ok = False
-    database_error: str | None = None
-    try:
-        database_ok = await db.ping()
-    except Exception as exc:  # noqa: BLE001
-        database_error = str(exc)
-
-    info = proxy_info(request)
-    principal, _api_key = auth
-    return {
-        "success": True,
-        "data": {
-            "upstream": config.upstream.base_url,
-            "auth_mode": config.auth.mode,
-            "database_configured": db.configured,
-            "database_ok": database_ok,
-            "database_error": database_error,
-            "auth_method": principal.method,
-            "api_key_valid": principal.api_key_valid,
-            "scheme": info.scheme,
-            "client_ip": info.client_ip,
-            "peer_ip": info.peer_ip,
-            "trusted_proxy": info.trusted_proxy,
-        },
-    }
+    """Perform a live test request against the configured WeKnora (list its knowledge
+    bases). If the backend answers, the probe succeeds; any connection failure or
+    non-2xx response is reported as a failure rather than turning into a 5xx.
+    """
+    _principal, api_key = auth
+    client = get_client()
+    result = await client.probe(api_key)
+    ok = result.pop("ok")
+    result["auth_method"] = _principal.method
+    return {"success": ok, "data": result}
