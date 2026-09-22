@@ -66,6 +66,27 @@ class ServiceConfig(BaseModel):
     workers: int = 1
 
 
+class SwaggerConfig(BaseModel):
+    """Swagger UI / OpenAPI exposure.
+
+    Set ``SWAGGER_ENABLED=false`` in the environment to fully disable ``/docs`` and
+    ``/openapi.json`` (e.g. in production). Enabled by default.
+    """
+
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+        if isinstance(v, int):
+            return bool(v)
+        return bool(v)
+
+
 class ProxyConfig(BaseModel):
     """HTTPS is terminated in front of this service (Cloudflare, nginx, traefik...).
 
@@ -122,7 +143,7 @@ class AuthConfig(BaseModel):
     require_on_v1: bool = True
     require_on_v2: bool = True
 
-    hmac_header_key: str = "X-Forge-Key"
+    # The HMAC lives in a single header, X-Forge-Signature (see hmac_header_signature).
     hmac_header_signature: str = "X-Forge-Signature"
 
     # There is no timestamp anymore: a signature is single-use for this TTL, which is
@@ -290,6 +311,7 @@ class PurgeConfig(BaseModel):
 
 class Config(BaseModel):
     service: ServiceConfig = Field(default_factory=ServiceConfig)
+    swagger: SwaggerConfig = Field(default_factory=SwaggerConfig)
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     upstream: UpstreamConfig = Field(default_factory=UpstreamConfig)
     auth: AuthConfig = Field(default_factory=AuthConfig)

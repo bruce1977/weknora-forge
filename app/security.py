@@ -164,9 +164,9 @@ def extract_upstream_api_key(request: Request, upstream: UpstreamConfig) -> str:
 
 
 def _client_label(request: Request, auth: AuthConfig, api_key: str) -> str:
-    """X-Forge-Key is an optional human-friendly label; fall back to the masked key."""
-    label = request.headers.get(auth.hmac_header_key, "").strip()
-    return label or f"apikey:{mask_secret(api_key)}"
+    """Identify the caller for logging. No X-Forge-Key header exists anymore, so the
+    label is derived from the (masked) API key."""
+    return f"apikey:{mask_secret(api_key)}"
 
 
 def verify_hmac_signature(

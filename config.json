@@ -6,6 +6,10 @@
     "workers": 1
   },
 
+  "swagger": {
+    "enabled": "${SWAGGER_ENABLED:-true}"
+  },
+
   "proxy": {
     "enabled": true,
     "trusted_proxies": ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
@@ -27,7 +31,6 @@
     "mode": "hmac",
     "require_on_v1": true,
     "require_on_v2": true,
-    "hmac_header_key": "X-Forge-Key",
     "hmac_header_signature": "X-Forge-Signature",
     "signature_cache_ttl_seconds": 300,
     "signature_cache_max_entries": 50000,

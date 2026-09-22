@@ -111,9 +111,9 @@ async def test_search_paginates(config):
 @pytest.mark.asyncio
 async def test_search_kb_filter_and_include_deleted(config):
     executor = RecordingExecutor([_row("1", {"level": 3})])
-    await MetasSearchService(executor, config).search(SearchRequest(query="level = 3", kb_id="kb-x"))
+    await MetasSearchService(executor, config).search(SearchRequest(query="level = 3", kb_ids=["kb-x"]))
     last_params = executor.params[-1]
-    assert last_params["forge_kb_id"] == "kb-x"
+    assert last_params["forge_kb_ids"] == ["kb-x"]
     assert 'k."deleted_at" IS NULL' in executor.main_sql
 
     executor = RecordingExecutor([_row("1", {"level": 3})])

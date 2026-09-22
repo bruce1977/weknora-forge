@@ -63,8 +63,6 @@ def build_headers(method: str, path: str, api_key: str, label: str = "") -> dict
         "X-Forge-Signature": build_signature(method, path, api_key),
         "Content-Type": "application/json",
     }
-    if label:
-        headers["X-Forge-Key"] = label
     if api_key:
         headers["X-API-Key"] = api_key
     return headers
@@ -76,7 +74,6 @@ def main() -> int:
     parser.add_argument("path", help="Path starting with /, including the query string if any")
     parser.add_argument("--base", default="http://localhost:8000", help="Service base URL")
     parser.add_argument("--api-key", required=True, help="WeKnora API key - also the HMAC signing key")
-    parser.add_argument("--key", default="", help="Optional X-Forge-Key label, used in logs")
     parser.add_argument(
         "--json",
         dest="json_body",
@@ -107,7 +104,7 @@ def main() -> int:
             print(f"cannot read the body: {exc}", file=sys.stderr)
             return 2
 
-    headers = build_headers(args.method, args.path, args.api_key, args.key)
+    headers = build_headers(args.method, args.path, args.api_key)
     for raw in args.header:
         name, value = _split_header(raw)
         if not name or not value:

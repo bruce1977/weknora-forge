@@ -182,3 +182,38 @@ def test_publish_waits_when_configured(client):
         assert polls["count"] >= 2
     finally:
         write_config({"publish": {"wait": False}})
+
+
+def test_publish_reuses_existing_tag_when_create_conflicts(client):
+    """Create-first: if WeKnora rejects the create (tag already exists), resolve by query."""
+    body = {"kb_id": "kb-1", "title": "t", "content": "c", "tag": {"name": "技术文档"}}
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+        # create rejected because the tag already exists
+        router.post(f"{UPSTREAM}/knowledge-bases/kb-1/tags").mock(
+            return_value=httpx.Response(409, json={"error": {"message": "tag already exists"}})
+        )
+        # fallback lookup finds the existing tag and returns its id
+        router.get(f"{UPSTREAM}/knowledge-bases/kb-1/tags").mock(
+            return_value=httpx.Response(
+                200,
+                json={"success": True, "data": {"data": [{"id": "tag-exists", "name": "技术文档"}], "total": 1}},
+            )
+        )
+        router.post(f"{UPSTREAM}/knowledge-bases/kb-1/knowledge/manual").mock(
+            return_value=httpx.Response(200, json={"success": True, "data": {"id": "kn-1", "parse_status": "pending"}})
+        )
+        router.get(f"{UPSTREAM}/knowledge/kn-1").mock(
+            return_value=httpx.Response(200, json={"success": True, "data": {"id": "kn-1", "custom_metadata": {}, "parse_status": "pending"}})
+        )
+        router.put(f"{UPSTREAM}/knowledge/kn-1").mock(return_value=httpx.Response(200, json={"success": True, "data": {}}))
+        router.put(f"{UPSTREAM}/knowledge/manual/kn-1").mock(
+            return_value=httpx.Response(200, json={"success": True, "data": {"id": "kn-1", "enable_status": "enabled"}})
+        )
+        resp = client.post(PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH))
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+    assert data["tag_id"] == "tag-exists"
+    assert data["tag_name"] == "技术文档"

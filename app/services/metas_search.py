@@ -67,7 +67,7 @@ BASE_INTERNAL_COLUMNS = ("id", "knowledge_base_id", "title", "updated_at", "crea
 @dataclass
 class SearchRequest:
     query: str
-    kb_id: Optional[str] = None
+    kb_ids: Optional[List[str]] = None
     page: int = 1
     page_size: int = 20
     case_insensitive: bool = False
@@ -311,9 +311,11 @@ class MetasSearchService:
         if not include_deleted and "deleted_at" in table_columns:
             clauses.append(f"{MAIN_ALIAS}.{quote_ident('deleted_at')} IS NULL")
 
-        if req.kb_id:
-            params["forge_kb_id"] = str(req.kb_id)
-            clauses.append(f"CAST({MAIN_ALIAS}.{quote_ident('knowledge_base_id')} AS TEXT) = :forge_kb_id")
+        if req.kb_ids:
+            params["forge_kb_ids"] = [str(k) for k in req.kb_ids]
+            clauses.append(
+                f"CAST({MAIN_ALIAS}.{quote_ident('knowledge_base_id')} AS TEXT) IN :forge_kb_ids"
+            )
 
         # Title search filter
         if req.title:

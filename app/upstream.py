@@ -279,16 +279,102 @@ class WeKnoraClient:
         sort_order: Optional[int] = None,
         create_if_missing: bool = True,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
-        """Return (tag, action); action is one of created | reused | missing."""
+        """Return (tag, action); action is one of created | reused | missing.
+
+        Create-first: try to create the tag, and only fall back to a name lookup when
+        WeKnora rejects the create (which it does when the tag already exists). This
+        avoids the trap where listing-by-keyword misses a deep page and we would
+        otherwise create a duplicate tag with a different id.
+        """
         if not name:
             return None, "none"
-        existing = await self.find_tag_by_name(kb_id, api_key, name)
-        if existing:
-            return existing, "reused"
         if not create_if_missing:
+            existing = await self.find_tag_by_name(kb_id, api_key, name)
+            if existing:
+                return existing, "reused"
             return None, "missing"
-        tag = await self.create_tag(kb_id, api_key, name, color, sort_order)
-        return tag, "created"
+        try:
+            tag = await self.create_tag(kb_id, api_key, name, color, sort_order)
+            return tag, "created"
+        except upstream_error:
+            # The create was rejected, most likely because the tag already exists.
+            # Resolve by querying rather than failing or silently duplicating.
+            existing = await self.find_tag_by_name(kb_id, api_key, name)
+            if existing:
+                return existing, "reused"
+            raise
+
+    async def list_knowledge_bases(
+        self, api_key: str, page: int = 1, page_size: int = 200
+    ) -> Dict[str, Any]:
+        """List knowledge bases from WeKnora (used by the connectivity probe)."""
+        resp = await self.call(
+            "GET",
+            "/knowledge-bases",
+            api_key=api_key,
+            params={"page": page, "page_size": page_size},
+        )
+        return resp.data or {}
+
+    async def probe(self, api_key: str) -> Dict[str, Any]:
+        """Lightweight connectivity probe: list the configured WeKnora's knowledge bases.
+
+        Returns a plain dict (never raises) so the /api/v2/probe endpoint can report
+        success/failure without turning a backend outage into a 5xx.
+        """
+        upstream = self.config.upstream
+        start = time.time()
+        try:
+            resp = await self._client.get(
+                "/knowledge-bases",
+                params={"page": 1, "page_size": 200},
+                headers=self._headers(api_key),
+                timeout=min(upstream.timeout_seconds, 15.0),
+            )
+            elapsed = (time.time() - start) * 1000
+            status = resp.status_code
+            if 200 <= status < 300:
+                payload = self._parse_body(resp)[0]
+                count = 0
+                if isinstance(payload, dict):
+                    data = payload.get("data")
+                    if isinstance(data, dict):
+                        count = data.get("total") or len(data.get("data", []) or [])
+                    elif isinstance(data, list):
+                        count = len(data)
+                return {
+                    "ok": True,
+                    "message": "WeKnora is reachable",
+                    "upstream": upstream.base_url,
+                    "upstream_status": status,
+                    "latency_ms": round(elapsed, 1),
+                    "knowledge_base_count": count,
+                }
+            return {
+                "ok": False,
+                "message": f"WeKnora responded with HTTP {status}",
+                "upstream": upstream.base_url,
+                "upstream_status": status,
+                "latency_ms": round(elapsed, 1),
+            }
+        except httpx.TimeoutException as exc:
+            elapsed = (time.time() - start) * 1000
+            return {
+                "ok": False,
+                "message": f"Upstream timed out: {exc}",
+                "upstream": upstream.base_url,
+                "upstream_status": 504,
+                "latency_ms": round(elapsed, 1),
+            }
+        except httpx.HTTPError as exc:
+            elapsed = (time.time() - start) * 1000
+            return {
+                "ok": False,
+                "message": f"Upstream unreachable: {exc}",
+                "upstream": upstream.base_url,
+                "upstream_status": 502,
+                "latency_ms": round(elapsed, 1),
+            }
 
     async def create_manual_knowledge(
         self,

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app.deps import get_db
 from app.main import create_app
 from app.services.db import FakeExecutor
-from tests.conftest import VALIDATE_URL, auth_headers
+from tests.conftest import UPSTREAM, VALIDATE_URL, auth_headers
 
 
 class FakeDatabase:
@@ -109,7 +109,7 @@ def test_search_endpoint_post(build_app):
     path = "/api/v2/knowledge/search"
     resp = client.post(
         path,
-        json={"metas_query": "level >= 3", "kb_id": "kb-1", "page": 1, "page_size": 20},
+        json={"metas_query": "level >= 3", "kb_ids": ["kb-1"], "page": 1, "page_size": 20},
         headers=auth_headers("POST", path),
     )
     assert resp.status_code == 200
@@ -117,7 +117,7 @@ def test_search_endpoint_post(build_app):
     assert body["success"] is True
     assert body["data"]["total"] == 1
     assert body["data"]["rows"][0]["id"] == "kn-1"
-    assert executor.params[-1]["forge_kb_id"] == "kb-1"
+    assert executor.params[-1]["forge_kb_ids"] == ["kb-1"]
     app.dependency_overrides.clear()
 
 
@@ -194,3 +194,61 @@ def test_endpoints_require_second_factor(path, build_app):
     resp = client.request(method, path, headers={"X-API-Key": "sk-test-key"})
     assert resp.status_code == 401
     app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_probe_succeeds_when_weknora_reachable(build_app):
+    app, client = build_app(SearchExecutor())
+    respx.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+    respx.get(f"{UPSTREAM}/knowledge-bases").mock(
+        return_value=httpx.Response(200, json={"success": True, "data": {"data": [{"id": "kb-1"}], "total": 1}})
+    )
+
+    resp = client.get("/api/v2/probe", headers=auth_headers("GET", "/api/v2/probe"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is True
+    assert body["data"]["knowledge_base_count"] == 1
+    app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_probe_reports_failure_when_weknora_down(build_app):
+    app, client = build_app(SearchExecutor())
+    respx.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+    respx.get(f"{UPSTREAM}/knowledge-bases").mock(side_effect=httpx.ConnectError("connection refused"))
+
+    resp = client.get("/api/v2/probe", headers=auth_headers("GET", "/api/v2/probe"))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["success"] is False
+    # a connection failure surfaces as a 502 from the upstream layer, never a 5xx
+    assert body["data"]["upstream_status"] == 502
+    app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_docs_and_openapi_are_served(build_app):
+    app, client = build_app(SearchExecutor())
+    # Offline Swagger assets + the generated OpenAPI schema must be reachable.
+    docs = client.get("/docs")
+    assert docs.status_code == 200
+    assert "swagger-ui" in docs.text.lower() or "SwaggerUIBundle" in docs.text
+    schema = client.get("/openapi.json")
+    assert schema.status_code == 200
+    paths = schema.json()["paths"]
+    assert "/api/v2/probe" in paths
+    assert "/api/v2/publish" in paths
+    assert "/api/v2/knowledge/search" in paths
+    # v2 search now takes kb_ids (array), not kb_id
+    search_post = paths["/api/v2/knowledge/search"]["post"]
+    schema = search_post["requestBody"]["content"]["application/json"]["schema"]
+    if "$ref" in schema:
+        ref = schema["$ref"].rsplit("/", 1)[-1]
+        props = schema_root["components"]["schemas"][ref]["properties"]
+    else:
+        props = schema["properties"]
+    assert "kb_ids" in props
+    assert "kb_id" not in props
+    app.dependency_overrides.clear()
+

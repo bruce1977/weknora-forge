@@ -93,7 +93,6 @@ def sign(method: str, path: str, api_key: str = API_KEY) -> str:
 def auth_headers(method: str, path: str, api_key: str = API_KEY) -> Dict[str, str]:
     return {
         "X-API-Key": api_key,
-        "X-Forge-Key": "tester",
         "X-Forge-Signature": sign(method, path, api_key),
         "Content-Type": "application/json",
     }

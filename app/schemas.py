@@ -56,7 +56,7 @@ class MetaSearchRequest(BaseModel):
     The `tags` field filters by tag names.
     """
 
-    kb_id: Optional[str] = Field(None, description="Restrict to one knowledge base")
+    kb_ids: Optional[List[str]] = Field(None, description="Restrict to one or more knowledge bases")
     metas_query: str = Field(..., description="FMQ expression for custom metadata, e.g. level >= 3 AND category = 'ops'")
     title: Optional[str] = Field(None, description="Full-text search on article title")
     tags: Optional[List[str]] = Field(None, description="Filter by tag names, e.g. ['ai', 'db']")

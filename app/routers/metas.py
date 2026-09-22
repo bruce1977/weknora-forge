@@ -23,7 +23,7 @@ def _resolve(payload: MetaSearchRequest, config: Config) -> SearchRequest:
     cfg = config.metas_search
     return SearchRequest(
         query=payload.metas_query,
-        kb_id=payload.kb_id,
+        kb_ids=payload.kb_ids,
         page=payload.page,
         page_size=payload.page_size or cfg.default_page_size,
         case_insensitive=payload.case_insensitive,
