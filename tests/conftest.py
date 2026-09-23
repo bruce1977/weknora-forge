@@ -11,7 +11,7 @@ import hmac
 import json
 import os
 import tempfile
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, Optional
 
 _TMP = tempfile.mkdtemp(prefix="forge-test-")
 
@@ -39,10 +39,16 @@ BASE_CONFIG: Dict[str, Any] = {
     "database": {"dsn": "", "host": "", "name": "WeKnora"},
     "metas_search": {
         "table": "knowledges",
-        "result_column": ["id", "title", "file_name", "similarity", "kb_name", "tag_name"],
+        "result_column": ["id", "title", "file_name", "kb_name", "tag_name"],
         "max_rows": 500,
+        "chunk_table": "chunks",
     },
-    "purge": {"dry_run": True, "default_retention_days": 30, "include_embed": False, "max_rows": 1000},
+    "purge": {
+        "dry_run": True,
+        "default_retention_days": 30,
+        "include_embed": False,
+        "max_rows": 1000,
+    },
 }
 
 _CONFIG_PATH = os.path.join(_TMP, "config.json")
@@ -51,12 +57,10 @@ with open(_CONFIG_PATH, "w", encoding="utf-8") as handle:
 
 os.environ["FORGE_CONFIG"] = _CONFIG_PATH
 
-import httpx  # noqa: E402
 import pytest  # noqa: E402
-import respx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app.config import get_config, load_config, reload_config  # noqa: E402
+from app.config import reload_config  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.security import reset_caches  # noqa: E402
 
@@ -111,25 +115,3 @@ def client() -> Iterator[TestClient]:
     application = create_app()
     with TestClient(application) as c:
         yield c
-
-
-@pytest.fixture()
-def upstream_validator():
-    """WeKnora answers the API key validation endpoint with 200 by default."""
-    route = None
-    with respx.mock(assert_all_called=False) as router:
-        route = router.get(VALIDATE_URL).mock(
-            return_value=httpx.Response(200, json={"success": True, "data": [], "total": 0})
-        )
-        yield route
-
-
-def json_ok(data: Any = None) -> httpx.Response:
-    return httpx.Response(200, json={"success": True, "data": data if data is not None else {}})
-
-
-# --------------------------------------------------------------------------- #
-# Fake PostgreSQL
-# --------------------------------------------------------------------------- #
-def fake_columns(**tables: List[str]) -> Dict[str, set]:
-    return {name: set(columns) for name, columns in tables.items()}

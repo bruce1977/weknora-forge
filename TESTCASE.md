@@ -163,43 +163,63 @@
 
 ---
 
-## 4. 跨多知识库检索 `kb_ids`（数组）
+## 4. 跨多知识库检索 `kb_ids`（数组，必填）
 
 **相关实现**：
-- `app/schemas.py::MetaSearchRequest.kb_ids: Optional[List[str]]`（替换原 `kb_id: str`）。
-- `app/routers/metas.py::_resolve` 透传 `payload.kb_ids`。
+- `app/schemas.py::MetaSearchRequest.kb_ids: List[str] = Field(..., min_length=1)`（必填，替换原 `kb_id: str`）。
+- `app/routers/metas.py::_resolve` 透传 `payload.kb_ids`；`_assert_kb_access` 先调
+  WeKnora `GET /knowledge-bases` 校验当前 API Key 对每个 kb_id 的权限。
 - `app/services/metas_search.py::SearchRequest.kb_ids` +
-  `_build_filters` 生成 `CAST(knowledge_base_id AS TEXT) IN :forge_kb_ids`
-  （SQLAlchemy `bindparam(expanding=True)` 展开数组）。
+  `_build_filters` 生成 `CAST(knowledge_base_id AS TEXT) IN (:forge_kb_id_0, ... :forge_kb_id_{n})`
+  （多库为同一 IN 子句内的多个占位符参数）。
+- 响应条目：`id` / `title` / `kb_name` / `metas`（完整 custom_metadata）/ `tag_names`（该页批量取全部标签）。
+- `return_content: true` 时额外返回 `items[].content`（`knowledges.metadata->>'content'`，空则拼接 `chunks.content`）；默认不返回该字段。
 
 ### TC-4.1 单库（`kb_ids: ["kb-1"]`）→ 生成 IN 过滤且返回命中
 - **测试函数**：`tests/test_api_endpoints.py::test_search_endpoint_post`
 - **请求体**：
   ```json
-  {"metas_query": "level >= 3", "kb_ids": ["kb-1"], "page": 1, "page_size": 20}
+  {"metas_query": "level = 3", "kb_ids": ["kb-1"], "page": 1, "page_size": 20}
   ```
-- **预期**：HTTP 200，`data.total == 1`，且注入到 SQL 的参数
-  `executor.params[-1]["forge_kb_ids"] == ["kb-1"]`。
+- **预期**：HTTP 200，`data.total == 1`，`data.items` 含 `metas` / `tag_names`，且主查询参数
+  `forge_kb_id_0 == "kb-1"`（tag 批量查询为另一页 scoped 查询）。
 - **断言要点**：
   ```python
-  assert executor.params[-1]["forge_kb_ids"] == ["kb-1"]
+  # 主 SQL（含 knowledges）绑定参数
+  assert main_params["forge_kb_id_0"] == "kb-1"
   ```
 
 ### TC-4.2 多库数组直接传入服务层 → 参数为字符串数组
-- **测试函数**：`tests/test_metas_search.py::test_search_kb_filter_and_include_deleted`
+- **测试函数**：`tests/test_metas_search.py::test_search_kb_filter`
 - **步骤**：直接构造 `SearchRequest(query="level = 3", kb_ids=["kb-x"])` 调用
   `MetasSearchService.search(...)`。
-- **预期**：最终 SQL 绑定参数 `last_params["forge_kb_ids"] == ["kb-x"]`，
-  且生成 `IN` 子句（支持同时在多个知识库检索）。
+- **预期**：最终主 SQL 绑定参数 `main_params["forge_kb_id_0"] == "kb-x"`，
+  且生成等值条件（支持同时在多个知识库检索）。
 - **断言要点**：
   ```python
-  assert last_params["forge_kb_ids"] == ["kb-x"]
+  assert executor.main_params["forge_kb_id_0"] == "kb-x"
   ```
 
-### TC-4.3 不传 `kb_ids` → 跨全库检索（无该过滤）
-- **说明**：既有 `test_search_endpoint_post_with_vector` / `..._with_title_and_tags` 等用例
-  均不传 `kb_ids`，断言正常返回，证明「缺省为全库」行为未被破坏。
-- **预期**：`data` 正常返回，`forge_kb_ids` 不应出现在绑定参数中。
+### TC-4.3 不传 `kb_ids` → 422 `INVALID_REQUEST`
+- **测试函数**：`tests/test_api_endpoints.py::test_search_requires_kb_ids`
+- **请求体**：`{"metas_query": "level = 3"}`（缺 `kb_ids`）。
+- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`（`min_length=1`）。
+
+### TC-4.4 `kb_ids` 含无权限知识库 → 403 `KB_ACCESS_DENIED`
+- **测试函数**：`tests/test_api_endpoints.py::test_search_forbids_inaccessible_kb`
+- **前置**：`GET {UPSTREAM}/knowledge-bases` 返回的 `data.data` 不含请求中的 kb_id。
+- **请求体**：`{"metas_query": "level = 3", "kb_ids": ["not-owned"]}`。
+- **预期**：HTTP 403，`error_id == "KB_ACCESS_DENIED"`。
+
+### TC-4.5 `return_content: true` → 每条结果带 `content` 正文
+- **测试函数**：`tests/test_api_endpoints.py::test_search_return_content_includes_body`、
+  `tests/test_metas_search.py::test_return_content_projects_metadata_body` /
+  `test_return_content_falls_back_to_chunks` / `test_return_content_defaults_off`。
+- **请求体**：`{"metas_query": "level = 3", "kb_ids": ["kb-1"], "return_content": true}`。
+- **预期**：
+  - HTTP 200，`items[0].content` 为正文字符串。
+  - 默认（不传或 `false`）时 `items[0]` **不含** `content` 键。
+  - 主 SQL 含 `->> 'content'` 投影；metadata 无正文时走 `chunks` 按 `chunk_index` 拼接。
 
 ---
 
@@ -211,7 +231,7 @@ python -m pytest tests -q
 ```
 
 四项增强均带有 mock（respx + FakeExecutor），**不触碰真实 WeKnora / PostgreSQL**。
-预期：92 项用例全绿。
+预期：97 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`）。
 
 ---
 
@@ -279,8 +299,7 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 ```
 输出 `X-API-Key` / `X-Forge-Signature` 及可选的可直接执行的 `curl` 命令。
 
-**重要**：POST/PUT/PATCH/DELETE 的签名是**一次性**的（在 `auth.signature_cache_ttl_seconds`
-内重放会被拒），Swagger 测写接口每次都要重新生成；GET 可复用。
+**重要**：POST/PUT/PATCH/DELETE 的签名是**一次性**的（重放会被拒），Swagger 测写接口每次都要重新生成；GET 可复用。
 
 ---
 
@@ -343,4 +362,5 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 
 > **文档更新**：README.md / README_CN.md 已同步 `tag_names`（替代 `tag`）、
 > `tag_ids`（替代 `tag_id`）、开放 health、probe 双重连通性检查、
-> 移除 proxy 配置、移除 keystore 等变更。
+> 移除 proxy 配置、移除 keystore、purge 响应去掉 `sample`、
+> search 返回完整 `metas`、`publish.timeout_seconds` 默认 300 等变更。

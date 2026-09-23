@@ -53,7 +53,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..errors import bad_request
 
@@ -225,7 +225,10 @@ def tokenize(text: str) -> List[Token]:
             else:
                 tokens.append(Token("IDENT", value, pos))
         else:
-            raise bad_request(f"Unrecognized character '{value}' (position {pos})", details={"position": pos})
+            raise bad_request(
+                f"Unrecognized character '{value}' (position {pos})",
+                details={"position": pos},
+            )
     tokens.append(Token("EOF", "", len(text)))
     return tokens
 
@@ -252,13 +255,17 @@ class Parser:
     def expect(self, kind: str) -> Token:
         tok = self.cur
         if tok.kind != kind:
-            raise bad_request(f"Syntax error: expected {kind}, got '{tok.value or 'EOF'}' (position {tok.pos})")
+            raise bad_request(
+                f"Syntax error: expected {kind}, got '{tok.value or 'EOF'}' (position {tok.pos})"
+            )
         return self.next()
 
     def parse(self) -> Any:
         node = self.parse_or()
         if self.cur.kind != "EOF":
-            raise bad_request(f"Syntax error: unexpected trailing content '{self.cur.value}' (position {self.cur.pos})")
+            raise bad_request(
+                f"Syntax error: unexpected trailing content '{self.cur.value}' (position {self.cur.pos})"
+            )
         return node
 
     def parse_or(self) -> Any:
@@ -288,7 +295,9 @@ class Parser:
             self.next()
             if self._looks_like_operand_list():
                 self.i = save
-                raise bad_request("Syntax error: a comparison expression is expected here")
+                raise bad_request(
+                    "Syntax error: a comparison expression is expected here"
+                )
             node = self.parse_or()
             self.expect("RPAREN")
             return node
@@ -305,7 +314,9 @@ class Parser:
         if tok.kind == "STRING":
             self.next()
             return tok.value
-        raise bad_request(f"Syntax error: expected a field name, got '{tok.value or 'EOF'}' (position {tok.pos})")
+        raise bad_request(
+            f"Syntax error: expected a field name, got '{tok.value or 'EOF'}' (position {tok.pos})"
+        )
 
     def parse_comparison(self) -> Cmp:
         name = self.parse_field()
@@ -332,7 +343,9 @@ class Parser:
             else:
                 raise bad_request(
                     f"Syntax error: missing operator after field '{name}' (position {self.cur.pos})",
-                    details={"hint": "Available: = != > >= < <= CONTAINS IN EXISTS STARTSWITH ENDSWITH MATCHES"},
+                    details={
+                        "hint": "Available: = != > >= < <= CONTAINS IN EXISTS STARTSWITH ENDSWITH MATCHES"
+                    },
                 )
 
         if negated:
@@ -348,9 +361,27 @@ class Parser:
 
         values = self.parse_operands()
         if not values:
-            raise bad_request(f"Syntax error: operator {op.value} is missing an operand (field {name})")
-        if op in (Op.EQ, Op.NE, Op.GT, Op.GTE, Op.LT, Op.LTE, Op.MATCHES, Op.STARTSWITH, Op.ENDSWITH) and len(values) > 1:
-            raise bad_request(f"Syntax error: operator {op.value} accepts a single operand only (field {name})")
+            raise bad_request(
+                f"Syntax error: operator {op.value} is missing an operand (field {name})"
+            )
+        if (
+            op
+            in (
+                Op.EQ,
+                Op.NE,
+                Op.GT,
+                Op.GTE,
+                Op.LT,
+                Op.LTE,
+                Op.MATCHES,
+                Op.STARTSWITH,
+                Op.ENDSWITH,
+            )
+            and len(values) > 1
+        ):
+            raise bad_request(
+                f"Syntax error: operator {op.value} accepts a single operand only (field {name})"
+            )
         return Cmp(name, op, values)
 
     def parse_operands(self) -> List[Any]:
@@ -379,7 +410,9 @@ class Parser:
         if tok.kind == "IDENT":
             # A bare word is accepted as a string literal (e.g. category = tech)
             return tok.value
-        raise bad_request(f"Syntax error: expected a literal, got '{tok.value or 'EOF'}' (position {tok.pos})")
+        raise bad_request(
+            f"Syntax error: expected a literal, got '{tok.value or 'EOF'}' (position {tok.pos})"
+        )
 
 
 def parse_query(text: str) -> Any:
@@ -528,15 +561,24 @@ def eval_cmp(cmp: Cmp, fields: Dict[str, Any], case_insensitive: bool) -> bool:
     found, actual = resolve_field(fields, cmp.field)
 
     if cmp.op in (Op.IN, Op.NOT_IN):
-        expected_list = cmp.values[0] if len(cmp.values) == 1 and isinstance(cmp.values[0], (list, tuple)) else cmp.values
-        hit = any(_compare_scalar(actual, v, Op.EQ, case_insensitive) for v in expected_list)
+        expected_list = (
+            cmp.values[0]
+            if len(cmp.values) == 1 and isinstance(cmp.values[0], (list, tuple))
+            else cmp.values
+        )
+        hit = any(
+            _compare_scalar(actual, v, Op.EQ, case_insensitive) for v in expected_list
+        )
         return hit if cmp.op == Op.IN else not hit
 
     expected = cmp.values[0]
 
     if cmp.op in (Op.CONTAINS, Op.NOT_CONTAINS):
         if isinstance(actual, (list, tuple, set)):
-            hit = any(_compare_scalar(item, expected, Op.EQ, case_insensitive) for item in actual)
+            hit = any(
+                _compare_scalar(item, expected, Op.EQ, case_insensitive)
+                for item in actual
+            )
         elif isinstance(actual, dict):
             hit = str(expected) in actual
         elif actual is None:
@@ -568,7 +610,9 @@ def evaluate(node: Any, fields: Dict[str, Any], case_insensitive: bool = False) 
     raise bad_request(f"Cannot evaluate node: {node!r}")
 
 
-def build_fields(record: Dict[str, Any], metas: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def build_fields(
+    record: Dict[str, Any], metas: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Flatten a knowledge record into a searchable field map (built-in fields get a $ prefix)."""
     fields: Dict[str, Any] = {}
     for key in BUILTIN_FIELDS:
@@ -677,7 +721,9 @@ def compile_sql(
                 t, _j, kind = resolve(item.field)
                 if not t:
                     return "1=1"
-                return f"(COALESCE({t}, '') = '')" if kind == "meta" else f"({t} IS NULL)"
+                return (
+                    f"(COALESCE({t}, '') = '')" if kind == "meta" else f"({t} IS NULL)"
+                )
             if isinstance(item, Cmp) and item.op == Op.NOT_CONTAINS and item.values:
                 t, j, kind = resolve(item.field)
                 if not t:
@@ -695,7 +741,9 @@ def compile_sql(
             return "1=1"
 
         if n.op == Op.EXISTS:
-            return f"(COALESCE({t}, '') <> '')" if kind == "meta" else f"({t} IS NOT NULL)"
+            return (
+                f"(COALESCE({t}, '') <> '')" if kind == "meta" else f"({t} IS NOT NULL)"
+            )
         if n.op == Op.NOT_EXISTS:
             return f"(COALESCE({t}, '') = '')" if kind == "meta" else f"({t} IS NULL)"
 
@@ -711,21 +759,33 @@ def compile_sql(
         if n.op in (Op.STARTSWITH, Op.ENDSWITH):
             if not n.values:
                 return "1=1"
-            pattern = param(f"{_like(n.values[0])}%" if n.op == Op.STARTSWITH else f"%{_like(n.values[0])}")
-            source = f"COALESCE({t}, '')" if kind == "meta" else f"COALESCE(({t})::text, '')"
+            pattern = param(
+                f"{_like(n.values[0])}%"
+                if n.op == Op.STARTSWITH
+                else f"%{_like(n.values[0])}"
+            )
+            source = (
+                f"COALESCE({t}, '')" if kind == "meta" else f"COALESCE(({t})::text, '')"
+            )
             return f"({source} {like_op} {pattern} ESCAPE '\\')"
 
         if n.op == Op.MATCHES:
             return "1=1"  # regex dialects differ too much to push down safely
 
         if n.op in (Op.IN, Op.NOT_IN):
-            raw = n.values[0] if len(n.values) == 1 and isinstance(n.values[0], (list, tuple)) else n.values
+            raw = (
+                n.values[0]
+                if len(n.values) == 1 and isinstance(n.values[0], (list, tuple))
+                else n.values
+            )
             values = list(raw or [])
             if not values:
                 return "1=1"
             text_items = ", ".join(param(text_of(v)) for v in values)
             if kind == "meta":
-                json_items = ", ".join(f"{json_param(v)}::jsonb" for v in values)
+                json_items = ", ".join(
+                    f"CAST({json_param(v)} AS jsonb)" for v in values
+                )
                 if n.op == Op.IN:
                     return f"(COALESCE({t}, '') IN ({text_items}) OR ({j}) IN ({json_items}))"
                 return (
@@ -739,22 +799,29 @@ def compile_sql(
         if len(n.values) != 1:
             return "1=1"
         value = n.values[0]
-        sql_op = {Op.EQ: "=", Op.NE: "<>", Op.GT: ">", Op.GTE: ">=", Op.LT: "<", Op.LTE: "<="}.get(n.op)
+        sql_op = {
+            Op.EQ: "=",
+            Op.NE: "<>",
+            Op.GT: ">",
+            Op.GTE: ">=",
+            Op.LT: "<",
+            Op.LTE: "<=",
+        }.get(n.op)
         if sql_op is None:
             return "1=1"
 
         if kind == "meta":
             if n.op == Op.EQ:
-                return f"(COALESCE({t}, '') = {param(text_of(value))} OR ({j}) = {json_param(value)}::jsonb)"
+                return f"(COALESCE({t}, '') = {param(text_of(value))} OR ({j}) = CAST({json_param(value)} AS jsonb))"
             if n.op == Op.NE:
                 return (
                     f"(COALESCE({t}, '') <> {param(text_of(value))} "
-                    f"AND ({j}) IS DISTINCT FROM {json_param(value)}::jsonb)"
+                    f"AND ({j}) IS DISTINCT FROM CAST({json_param(value)} AS jsonb))"
                 )
             # Ordering: keep both interpretations (jsonb ordering and plain text) so the
             # SQL stays a superset of whatever evaluate() decides.
             return (
-                f"(({j}) {sql_op} {json_param(value)}::jsonb "
+                f"(({j}) {sql_op} CAST({json_param(value)} AS jsonb) "
                 f"OR COALESCE({t}, '') {sql_op} {param(text_of(value))})"
             )
 
@@ -769,7 +836,12 @@ def compile_sql(
 def describe(node: Any) -> Any:
     """Turn the AST into a JSON-serializable structure (used by /metas/parse for debugging)."""
     if isinstance(node, Cmp):
-        return {"type": "cmp", "field": node.field, "op": node.op.value, "values": node.values}
+        return {
+            "type": "cmp",
+            "field": node.field,
+            "op": node.op.value,
+            "values": node.values,
+        }
     if isinstance(node, Not):
         return {"type": "not", "item": describe(node.item)}
     if isinstance(node, Bool):

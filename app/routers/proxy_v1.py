@@ -45,7 +45,7 @@ def forward_headers(request: Request, api_key: str) -> Dict[str, str]:
     return headers
 
 
-def build_proxy_router(prefix: str, config: Config) -> APIRouter:
+def build_proxy_router(prefix: str) -> APIRouter:
     router = APIRouter(prefix=prefix or "", tags=["v1-passthrough"])
 
     @router.api_route("/{path:path}", methods=METHODS, include_in_schema=False)
@@ -72,7 +72,8 @@ def build_proxy_router(prefix: str, config: Config) -> APIRouter:
         resp_headers = {
             k: v
             for k, v in upstream.headers.items()
-            if k.lower() not in HOP_BY_HOP and k.lower() not in {"content-length", "content-encoding"}
+            if k.lower() not in HOP_BY_HOP
+            and k.lower() not in {"content-length", "content-encoding"}
         }
 
         async def stream():

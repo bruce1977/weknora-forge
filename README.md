@@ -18,7 +18,7 @@ What the native API lacks, and how Forge covers it:
 | --- | --- | --- |
 | No second credential beyond the API key | HMAC-SHA256 signature header, keyed by the API key itself | every v1 / v2 route |
 | Manual knowledge needs multi-step choreography (draft → metadata → publish) | one server-side call, rolled back on failure | `POST /api/v2/publish` |
-| Only title/tag/time filtering, no `custom_metadata` search | FMQ query language pushed down to PostgreSQL JSONB | `POST·GET /api/v2/knowledge/search` |
+| Only title/tag/time filtering, no `custom_metadata` search | FMQ query language pushed down to PostgreSQL JSONB | `POST /api/v2/knowledge/search` |
 | Soft delete only (writes `deleted_at`), no physical purge | ordered cascade delete + orphan vector sweep | `DELETE /api/v2/management/purge` |
 
 ---
@@ -40,7 +40,7 @@ curl http://localhost:8000/api/v2/health           # open endpoint, no auth requ
 python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt   # Windows
 # source .venv/bin/activate && pip install -r requirements-dev.txt          # Linux/macOS
 
-uvicorn app.main:app --reload --port 8000 --no-proxy-headers
+python -m uvicorn app.main:app --reload --port 8000 --no-proxy-headers --env-file .env
 python scripts/show_config.py                       # effective config, secrets masked
 ```
 
@@ -48,8 +48,8 @@ python scripts/show_config.py                       # effective config, secrets 
 > Uvicorn's own handling only trusts 127.0.0.1, so it would silently ignore `X-Forwarded-*`
 > coming from a container or tunnel (see chapter 2).
 
-Tests: `python -m pytest tests -q` (**92 tests**, upstream mocked with respx - no real
-WeKnora instance and no database required).
+Tests: `python -m pytest tests -q` (**97 passed, 2 skipped** — live tests need `WEKNORA_BASE_URL`;
+the rest are mocked with respx, no real WeKnora or database required).
 
 ---
 
@@ -70,8 +70,6 @@ WeKnora instance and no database required).
 | `POST` | `/api/v2/publish` | HMAC | Publish knowledge (multi-tag support) |
 | **v2 Metadata Search** | | | |
 | `POST` | `/api/v2/knowledge/search` | HMAC | Search by metadata, title, tags |
-| `POST` | `/api/v2/metas/parse` | HMAC | Parse FMQ expression |
-| `GET` | `/api/v2/metas/grammar` | HMAC | FMQ syntax reference |
 | **v2 Maintenance** | | | |
 | `DELETE` | `/api/v2/management/purge` | HMAC | Purge soft-deleted data |
 
@@ -142,16 +140,21 @@ Requires HMAC auth. Tests both WeKnora and PostgreSQL connectivity.
 ```JSON
 {
   "success": true,
-  "weknora": {
-    "ok": true,
-    "knowledge_base_count": 4,
-    "latency_ms": 120.5
-  },
-  "database": {
-    "ok": true,
-    "latency_ms": 15.2
-  },
-  "auth_method": "hmac"
+  "data": {
+    "weknora": {
+      "message": "WeKnora is reachable",
+      "upstream": "http://localhost:8080",
+      "upstream_status": 200,
+      "latency_ms": 120.5,
+      "knowledge_base_count": 4
+    },
+    "database": {
+      "ok": true,
+      "message": "PostgreSQL is reachable",
+      "latency_ms": 15.2
+    },
+    "auth_method": "hmac"
+  }
 }
 ```
 
@@ -160,16 +163,20 @@ Requires HMAC auth. Tests both WeKnora and PostgreSQL connectivity.
 ```JSON
 {
   "success": false,
-  "weknora": {
-    "ok": false,
-    "error": "Connection refused",
-    "upstream_status": 502
-  },
-  "database": {
-    "ok": true,
-    "latency_ms": 12.1
-  },
-  "auth_method": "hmac"
+  "data": {
+    "weknora": {
+      "message": "Upstream unreachable: Connection refused",
+      "upstream": "http://localhost:8080",
+      "upstream_status": 502,
+      "latency_ms": 3.1
+    },
+    "database": {
+      "ok": true,
+      "message": "PostgreSQL is reachable",
+      "latency_ms": 12.1
+    },
+    "auth_method": "hmac"
+  }
 }
 ```
 
@@ -245,20 +252,20 @@ Executes the full publish orchestration: resolve tag names → create/get tags �
 
 #### `POST /api/v2/knowledge/search` {#post-api-v2-knowledge-search}
 
-Search knowledge by custom metadata, title, and tags. The `metas_query` field accepts FMQ expressions for custom metadata filtering, `title` enables full-text search on article titles, and `tags` filters by tag names.
+Search knowledge by custom metadata, title, and tags. The `metas_query` field accepts FMQ expressions for custom metadata filtering, `title` enables full-text search on article titles, and `tags` filters by tag names. See [FMQ.md](./FMQ.md) for the full query language reference.
 
 **Request**
 
 ```JSON
 {
-  "kb_id": "kb-00000001",
+  "kb_ids": ["kb-00000001"],
   "metas_query": "level >= 3 AND category = 'ops'",
   "title": "Milvus",
   "tags": ["ai", "db"],
   "page": 1,
   "page_size": 20,
   "case_insensitive": true,
-  "include_deleted": false
+  "return_content": false
 }
 ```
 
@@ -268,61 +275,27 @@ Search knowledge by custom metadata, title, and tags. The `metas_query` field ac
 {
   "success": true,
   "data": {
-    "rows": [
+    "items": [
       {
         "id": "k-00000001",
         "title": "Milvus cluster deployment guide",
-        "custom_metadata": {...},
-        "similarity": 0.95
+        "kb_name": "Test Database",
+        "metas": {"level": 3, "category": "ops", "hashcode": "abc123"},
+        "tag_names": ["ai", "db"]
       }
     ],
     "total": 100,
     "page": 1,
     "page_size": 20,
-    "has_more": true,
-    "scanned": 150,
-    "truncated": false
+    "has_more": true
   }
 }
 ```
 
----
-
-#### `POST /api/v2/metas/parse` {#post-api-v2-metas-parse}
-
-Parse FMQ expression and return AST (debug tool).
-
-**Request**
-
-```JSON
-{
-  "query": "level >= 3 AND tags CONTAINS 'ai'"
-}
-```
-
-**Response**
-
-```JSON
-{
-  "success": true,
-  "data": {
-    "query": "level >= 3 AND tags CONTAINS 'ai'",
-    "ast": {...},
-    "fields": ["level", "tags"]
-  }
-}
-```
-
----
-
-#### `GET /api/v2/metas/grammar` {#get-api-v2-metas-grammar}
-
-Returns FMQ syntax reference and built-in fields list.
-
-```bash
-curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
-  http://localhost:8000/api/v2/metas/grammar
-```
+**Notes**
+- `kb_ids` is required and must be accessible by the caller's API key (validated via WeKnora `GET /knowledge-bases`). Returns 403 `KB_ACCESS_DENIED` if any ID is not accessible.
+- Response items expose `id`, `title`, `kb_name`, `metas` (the full `custom_metadata` blob for each hit), and `tag_names` (all tags as an array).
+- Set `return_content: true` to also return each hit's article body as `items[].content` (from `knowledges.metadata->>'content'`, falling back to concatenated `chunks.content`). Default `false` keeps the payload small.
 
 ---
 
@@ -346,12 +319,29 @@ Purges soft-deleted data based on retention days. Executes cascade delete in tab
 {
   "success": true,
   "data": {
-    "matched": 150,
-    "deleted": 150,
-    "orphan_matched": 500,
-    "orphan_deleted": 500,
-    "skipped_tables": [],
-    "sample": ["k-00000001", "k-00000002"]
+    "dry_run": true,
+    "retention_days": 30,
+    "cutoff": "2026-08-24T00:00:00+00:00",
+    "include_embed": false,
+    "counts": {
+      "knowledge_bases": 0,
+      "knowledges": 150
+    },
+    "matched": {
+      "knowledges": 150,
+      "embeddings": 500
+    },
+    "deleted": {
+      "knowledges": 0,
+      "embeddings": 0
+    },
+    "orphan_matched": {
+      "embeddings (orphan)": 500
+    },
+    "orphan_deleted": {
+      "embeddings (orphan)": 0
+    },
+    "skipped_tables": []
   }
 }
 ```
@@ -466,15 +456,14 @@ into the file:
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "wait_until": "enabled", "timeout_seconds": 90,
+  "publish":  { "wait_until": "enabled", "timeout_seconds": 300,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
                 "user": "${DB_USER:-postgres}", "password": "${DB_PASSWORD:-}", "name": "${DB_NAME:-WeKnora}",
-                "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "statement_timeout_ms": 30000 },
-  "metas_search": { "table": "knowledges", "metadata_column": "custom_metadata", "include_deleted": false,
-                    "result_column": ["id", "title", "file_name", "similarity", "kb_name", "tag_name"],
-                    "vector": { "distance_operator": "<=>", "similarity_expression": "1 - ({distance})" },
+                "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "max_overflow": 5, "statement_timeout_ms": 30000 },
+  "metas_search": { "table": "knowledges", "metadata_column": "custom_metadata",
+                    "result_column": ["id", "title", "file_name", "kb_name", "tag_name"],
                     "max_rows": 5000, "default_page_size": 20, "extra_where": "" },
   "purge":    { "dry_run": true, "default_retention_days": 30, "include_embed": false, "max_rows": 200000,
                 "tables": [ /* see chapter 7 */ ], "orphan_tables": [ /* ... */ ] }
@@ -488,7 +477,7 @@ Notes:
   (or `0` / `no` / `off`) to fully disable `GET /docs` and `GET /openapi.json` - useful in
   production. Defaults to `true`. The UI is vendored locally (`app/static/swagger`, from
   `swagger-ui-dist@5.17.14`) so it renders without any external CDN.
-- `metas_search.extra_where`, `vector.similarity_expression` and `purge.tables` are **server-side**
+- `metas_search.extra_where` and `purge.tables` are **server-side**
   settings containing SQL fragments - never expose them to callers. Table/column names are validated
   against an identifier whitelist.
 - `database.sslmode` uses asyncpg's vocabulary (`disable|allow|prefer|require|verify-ca|verify-full`)
@@ -503,8 +492,10 @@ Error envelope:
 {"success": false, "error_id": "UPSTREAM_ERROR", "error_message": "...", "details": {...}}
 ```
 
-Common `error_id` values: `INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZED` / `UPSTREAM_ERROR` /
-`DATABASE_ERROR` / `DB_NOT_CONFIGURED` / `UNSAFE_IDENTIFIER` / `INVALID_RETENTION_DAYS` / `BAD_REQUEST`.
+Common `error_id` values: `INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZED` / `FORBIDDEN` /
+`KB_ACCESS_DENIED` / `UPSTREAM_ERROR` / `DATABASE_ERROR` / `DB_NOT_CONFIGURED` / `UNSAFE_IDENTIFIER` /
+`TABLE_NOT_FOUND` / `METADATA_COLUMN_MISSING` / `TAG_NOT_FOUND` / `PURGE_LIMIT_EXCEEDED` /
+`INVALID_RETENTION_DAYS` / `INVALID_REQUEST` / `INTERNAL_ERROR` / `BAD_REQUEST`.
 
 ---
 
@@ -517,16 +508,20 @@ app/
 ├── config.py              # config.json loading + ${ENV} expansion (auto-detects data/config.json)
 ├── security.py            # second factor (HMAC over METHOD + FULL_PATH)
 ├── upstream.py            # WeKnora client (passthrough, semantic calls, API key cache)
+├── schemas.py             # request/response models (publish, metas search)
+├── logging.py             # log setup
 ├── deps.py / errors.py    # dependency wiring / error envelope
 ├── routers/               # proxy_v1 / publish / metas / maintenance / system
 └── services/
     ├── db.py              # PostgreSQL engine and Executor (FakeExecutor for tests)
     ├── meta_dsl.py        # FMQ lexer + parser + evaluator + jsonb SQL pushdown
-    ├── metas_search.py    # metadata search (SQL assembly, paging, vector scoring)
+    ├── metas_search.py    # metadata search (SQL assembly, paging)
     ├── publish_service.py # publish orchestration (tags -> draft -> metas -> publish -> optional wait)
     └── purge_service.py   # physical purge (cascade delete + orphan sweep)
-scripts/                   # hmac_request.py (signed request helper) / show_config.py
-tests/                     # 92 tests, upstream mocked with respx
+scripts/                   # gen_forge_signature.py / hmac_request.py / show_config.py
+tests/                     # 97 tests (2 live skipped), respx mocked upstream
+FMQ.md                     # FMQ query language full reference
+pyproject.toml             # pytest config (asyncio_mode, testpaths)
 data/                      # runtime data (config.json, etc.)
 ```
 
@@ -539,8 +534,8 @@ data/                      # runtime data (config.json, etc.)
 - **The v1 passthrough buffers the request body in memory**: for very large uploads (Cloudflare caps
   them at 100 MB anyway) talk to WeKnora directly on the internal network. Responses are streamed.
 - **Metadata search talks to PostgreSQL directly**: if a WeKnora upgrade changes the schema, adjust
-  table/column names in `config.json → metas_search` instead of touching code. With
-  `include_deleted=false` soft-deleted rows are excluded.
+  table/column names in `config.json → metas_search` instead of touching code. Soft-deleted rows
+  are always excluded.
 - **Purge only covers database rows**: `include_embed=true` also sweeps unattached vector/chunk rows,
   but residue inside the vector store itself may still need the upstream tooling.
 - **v1 does not modify request or response bodies**, so the native limitations remain - which is

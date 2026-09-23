@@ -48,8 +48,6 @@ class PurgeReport:
     include_embed: bool
     knowledge_base_count: int = 0
     knowledge_count: int = 0
-    knowledge_bases_sample: List[str] = field(default_factory=list)
-    knowledges_sample: List[str] = field(default_factory=list)
     matched: Dict[str, int] = field(default_factory=dict)
     deleted: Dict[str, int] = field(default_factory=dict)
     orphan_matched: Dict[str, int] = field(default_factory=dict)
@@ -75,9 +73,7 @@ class PurgeService:
         kn_ids = await self._soft_deleted_knowledges(cutoff, kb_ids)
 
         total = len(kb_ids) + len(kn_ids)
-        truncated = False
         if max_rows and total > max_rows:
-            truncated = True
             raise bad_request(
                 f"Candidate row count {total} exceeds the configured limit {max_rows}; "
                 "lower retention_days window or raise purge.max_rows",
@@ -91,8 +87,6 @@ class PurgeService:
             include_embed=req.include_embed,
             knowledge_base_count=len(kb_ids),
             knowledge_count=len(kn_ids),
-            knowledge_bases_sample=kb_ids[:10],
-            knowledges_sample=kn_ids[:10],
         )
 
         if not kb_ids and not kn_ids:
@@ -109,7 +103,12 @@ class PurgeService:
 
         logger.warning(
             "purge finished | dry_run=%s retention_days=%s kb=%d knowledge=%d deleted=%s orphans=%s",
-            req.dry_run, req.retention_days, len(kb_ids), len(kn_ids), report.deleted, report.orphan_deleted,
+            req.dry_run,
+            req.retention_days,
+            len(kb_ids),
+            len(kn_ids),
+            report.deleted,
+            report.orphan_deleted,
         )
         return report
 
@@ -123,7 +122,9 @@ class PurgeService:
         rows = await self.ex.fetch(sql, {"cutoff": cutoff})
         return [str(r["id"]) for r in rows]
 
-    async def _soft_deleted_knowledges(self, cutoff: datetime, kb_ids: List[str]) -> List[str]:
+    async def _soft_deleted_knowledges(
+        self, cutoff: datetime, kb_ids: List[str]
+    ) -> List[str]:
         columns = await self.ex.columns(KNOWLEDGE_TABLE)
         if not columns:
             return []
@@ -133,12 +134,18 @@ class PurgeService:
             where += " OR CAST(knowledge_base_id AS TEXT) IN :kb_ids"
             params["kb_ids"] = kb_ids
         sql = f"SELECT CAST(id AS TEXT) AS id FROM {quote_ident(KNOWLEDGE_TABLE)} WHERE {where}"
-        logger.debug("purge SQL: %s | params: %s", sql, {k: str(v)[:100] for k, v in params.items()})
+        logger.debug(
+            "purge SQL: %s | params: %s",
+            sql,
+            {k: str(v)[:100] for k, v in params.items()},
+        )
         rows = await self.ex.fetch(sql, params)
         return [str(r["id"]) for r in rows]
 
     # ------------------------------------------------------------------ #
-    async def _cascade(self, report: PurgeReport, kb_ids: List[str], kn_ids: List[str], dry_run: bool) -> None:
+    async def _cascade(
+        self, report: PurgeReport, kb_ids: List[str], kn_ids: List[str], dry_run: bool
+    ) -> None:
         for spec in self.config.purge.tables:
             table = spec.table
             columns = await self.ex.columns(table)
@@ -150,17 +157,27 @@ class PurgeService:
                 report.skipped_tables.append(table)
                 continue
             count_sql = f"SELECT COUNT(*) FROM {quote_ident(table)} WHERE {where}"
-            logger.debug("purge SQL: %s | params: %s", count_sql, {k: str(v)[:100] for k, v in params.items()})
+            logger.debug(
+                "purge SQL: %s | params: %s",
+                count_sql,
+                {k: str(v)[:100] for k, v in params.items()},
+            )
             matched = int(await self.ex.scalar(count_sql, params) or 0)
             report.matched[table] = matched
             if dry_run or not matched:
                 report.deleted[table] = 0
                 continue
             del_sql = f"DELETE FROM {quote_ident(table)} WHERE {where}"
-            logger.debug("purge SQL: %s | params: %s", del_sql, {k: str(v)[:100] for k, v in params.items()})
+            logger.debug(
+                "purge SQL: %s | params: %s",
+                del_sql,
+                {k: str(v)[:100] for k, v in params.items()},
+            )
             report.deleted[table] = int(await self.ex.execute(del_sql, params))
 
-    async def _delete_knowledge_bases(self, report: PurgeReport, kb_ids: List[str], dry_run: bool) -> None:
+    async def _delete_knowledge_bases(
+        self, report: PurgeReport, kb_ids: List[str], dry_run: bool
+    ) -> None:
         if not kb_ids:
             return
         columns = await self.ex.columns(KB_TABLE)
@@ -226,11 +243,19 @@ class PurgeService:
     ) -> tuple[str, Dict[str, Any]]:
         clauses: List[str] = []
         params: Dict[str, Any] = {}
-        if kb_ids and spec.knowledge_base_column and spec.knowledge_base_column in columns:
-            clauses.append(f"CAST({quote_ident(spec.knowledge_base_column)} AS TEXT) IN :kb_ids")
+        if (
+            kb_ids
+            and spec.knowledge_base_column
+            and spec.knowledge_base_column in columns
+        ):
+            clauses.append(
+                f"CAST({quote_ident(spec.knowledge_base_column)} AS TEXT) IN :kb_ids"
+            )
             params["kb_ids"] = kb_ids
         if kn_ids and spec.knowledge_column and spec.knowledge_column in columns:
-            clauses.append(f"CAST({quote_ident(spec.knowledge_column)} AS TEXT) IN :kn_ids")
+            clauses.append(
+                f"CAST({quote_ident(spec.knowledge_column)} AS TEXT) IN :kn_ids"
+            )
             params["kn_ids"] = kn_ids
         if not clauses:
             return "", {}
@@ -251,7 +276,10 @@ def resolve_request(
     purge = config.purge
     days = purge.default_retention_days if retention_days is None else retention_days
     if days is None or days < 0:
-        raise bad_request("retention_days must be a non-negative integer", error_id="INVALID_RETENTION_DAYS")
+        raise bad_request(
+            "retention_days must be a non-negative integer",
+            error_id="INVALID_RETENTION_DAYS",
+        )
     return PurgeRequest(
         retention_days=days,
         include_embed=purge.include_embed if include_embed is None else include_embed,

@@ -24,7 +24,9 @@ def config_dep() -> Config:
 
 
 def get_client() -> WeKnoraClient:
-    if _client is None:  # pragma: no cover - the lifespan hook guarantees initialization
+    if (
+        _client is None
+    ):  # pragma: no cover - the lifespan hook guarantees initialization
         raise RuntimeError("WeKnoraClient is not initialized")
     return _client
 
@@ -67,12 +69,17 @@ async def verify_v1(
     else:
         from .security import extract_upstream_api_key
 
-        api_key = extract_upstream_api_key(request, config.upstream)
+        api_key = extract_upstream_api_key(request)
         principal = Principal(
-            client_id="anonymous", method="anonymous", api_key_present=bool(api_key), api_key_ref=mask_secret(api_key)
+            client_id="anonymous",
+            method="anonymous",
+            api_key_present=bool(api_key),
+            api_key_ref=mask_secret(api_key),
         )
     if not api_key:
-        raise unauthorized("Missing WeKnora API key: provide X-API-Key (or Authorization: Bearer)")
+        raise unauthorized(
+            "Missing WeKnora API key: provide X-API-Key (or Authorization: Bearer)"
+        )
     principal.api_key_present = True
     principal.api_key_ref = mask_secret(api_key)
     return principal, api_key
@@ -87,12 +94,17 @@ async def verify_v2(
     else:
         from .security import extract_upstream_api_key
 
-        api_key = extract_upstream_api_key(request, config.upstream)
+        api_key = extract_upstream_api_key(request)
         principal = Principal(
-            client_id="anonymous", method="anonymous", api_key_present=bool(api_key), api_key_ref=mask_secret(api_key)
+            client_id="anonymous",
+            method="anonymous",
+            api_key_present=bool(api_key),
+            api_key_ref=mask_secret(api_key),
         )
     if not api_key:
-        raise unauthorized("Missing WeKnora API key: provide X-API-Key (or Authorization: Bearer)")
+        raise unauthorized(
+            "Missing WeKnora API key: provide X-API-Key (or Authorization: Bearer)"
+        )
 
     client = get_client()
     valid, message, status = await client.validate_api_key(api_key)
@@ -107,4 +119,6 @@ def _api_key_failure(message: str, status: int) -> ForgeError:
     """Keep "key rejected" (401) apart from "WeKnora unreachable" (502)."""
     if status in (401, 403, 0):
         return invalid_api_key(f"WeKnora rejected the API key: {message}")
-    return upstream_error(f"Unable to validate the WeKnora API key (upstream status {status}): {message}")
+    return upstream_error(
+        f"Unable to validate the WeKnora API key (upstream status {status}): {message}"
+    )

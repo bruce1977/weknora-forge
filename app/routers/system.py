@@ -10,7 +10,6 @@ from .. import __version__
 from ..config import Config
 from ..deps import config_dep, get_client, get_db, verify_v2
 from ..logging import get_logger
-from ..proxy import proxy_info
 from ..security import Principal
 
 logger = get_logger(__name__)
@@ -31,7 +30,9 @@ async def root(config: Config = Depends(config_dep)) -> dict:
     }
 
 
-@router.get("/health", summary="Lightweight liveness check (no auth, no resource access)")
+@router.get(
+    "/health", summary="Lightweight liveness check (no auth, no resource access)"
+)
 async def health() -> dict:
     # Intentionally open and dependency-free: a cold liveness probe that must not touch
     # WeKnora, PostgreSQL or any other resource so it stays fast and always answers.
@@ -68,7 +69,9 @@ async def probe(
         try:
             db_ok = await db.ping()
             db_latency_ms = round((time.time() - db_start) * 1000, 1)
-            db_message = "PostgreSQL is reachable" if db_ok else "PostgreSQL ping failed"
+            db_message = (
+                "PostgreSQL is reachable" if db_ok else "PostgreSQL ping failed"
+            )
         except Exception as exc:  # noqa: BLE001
             db_latency_ms = round((time.time() - db_start) * 1000, 1)
             db_message = f"PostgreSQL error: {exc}"

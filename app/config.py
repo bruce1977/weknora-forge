@@ -35,7 +35,9 @@ def _expand_env(value: Any) -> Any:
     """Recursively expand environment placeholders inside strings."""
     if isinstance(value, str):
         return _ENV_PLACEHOLDER.sub(
-            lambda m: os.environ.get(m.group(1), m.group(2) if m.group(2) is not None else ""),
+            lambda m: os.environ.get(
+                m.group(1), m.group(2) if m.group(2) is not None else ""
+            ),
             value,
         )
     if isinstance(value, list):
@@ -161,7 +163,9 @@ class DatabaseConfig(BaseModel):
             return self.dsn.strip()
         user = quote_plus(self.user or "")
         password = f":{quote_plus(self.password)}" if self.password else ""
-        return f"postgresql+asyncpg://{user}{password}@{self.host}:{self.port}/{self.name}"
+        return (
+            f"postgresql+asyncpg://{user}{password}@{self.host}:{self.port}/{self.name}"
+        )
 
     @property
     def configured(self) -> bool:
@@ -180,34 +184,6 @@ class MetasJoinConfig(BaseModel):
     tag_name: bool = True
 
 
-class VectorConfig(BaseModel):
-    """Vector-similarity scoring (only active when the caller supplies a vector).
-
-    The distance is computed per knowledge row with a LATERAL sub-query so that a
-    knowledge item owning several chunks still yields exactly one row, scored by its
-    closest chunk. Rows without any embedding row get a NULL score (pushed last).
-    """
-
-    table: str = "embeddings"
-    column: str = "embedding"
-    knowledge_column: str = "knowledge_id"
-    # <=> cosine | <-> L2 | <#> inner product
-    distance_operator: Literal["<=>", "<->", "<#>"] = "<=>"
-    # {distance} is replaced by the per-row minimal distance expression
-    similarity_expression: str = "1 - ({distance})"
-    # Index behaviour overrides; only applied when > 0 (SET LOCAL inside the request txn)
-    default_probes: int = 0
-    default_ef_search: int = 0
-    default_beam_factor: int = 0
-
-    @field_validator("similarity_expression")
-    @classmethod
-    def _check_expression(cls, v: str) -> str:
-        if ";" in v:
-            raise ValueError("similarity_expression must not contain ';'")
-        return v
-
-
 class MetasSearchConfig(BaseModel):
     """Tables, columns and defaults for the Custom Metas search."""
 
@@ -216,23 +192,30 @@ class MetasSearchConfig(BaseModel):
     knowledge_base_table: str = "knowledge_bases"
     tag_table: str = "knowledge_tags"
     tag_relation_table: str = "knowledge_tag_relations"
+    # Used when return_content=true and knowledges.metadata has no content key:
+    # text chunks are concatenated in chunk_index order.
+    chunk_table: str = "chunks"
 
     join: MetasJoinConfig = Field(default_factory=MetasJoinConfig)
-    include_deleted: bool = False
 
     # Result columns, resolved by alias. "kb_name" / "tag_name" come from the joins,
-    # "file_name" falls back through the list below when the column does not exist,
-    # "similarity" is the vector score (always NULL when no vector is supplied).
+    # "file_name" falls back through the list below when the column does not exist.
     result_column: List[str] = Field(
-        default_factory=lambda: ["id", "title", "file_name", "similarity", "kb_name", "tag_name"]
+        default_factory=lambda: ["id", "title", "file_name", "kb_name", "tag_name"]
     )
     file_name_candidate: List[str] = Field(
-        default_factory=lambda: ["file_name", "filename", "file_path", "source_url", "source", "title"]
+        default_factory=lambda: [
+            "file_name",
+            "filename",
+            "file_path",
+            "source_url",
+            "source",
+            "title",
+        ]
     )
-    vector: VectorConfig = Field(default_factory=VectorConfig)
 
     default_order: List[SortSpec] = Field(
-        default_factory=lambda: [SortSpec(column="similarity", desc=True), SortSpec(column="updated_at", desc=True)]
+        default_factory=lambda: [SortSpec(column="updated_at", desc=True)]
     )
     max_rows: int = 5000
     default_page_size: int = 20
@@ -282,25 +265,85 @@ class Config(BaseModel):
 
 
 _DEFAULT_PURGE_TABLES: List[Dict[str, str]] = [
-    {"table": "embeddings", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
-    {"table": "chunks", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
-    {"table": "chunk_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
-    {"table": "knowledge_tag_relations", "knowledge_base_column": "", "knowledge_column": "knowledge_id"},
-    {"table": "knowledge_processing_spans", "knowledge_base_column": "", "knowledge_column": "knowledge_id"},
-    {"table": "wiki_page_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
-    {"table": "wiki_page_issues", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
-    {"table": "wiki_pages", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
-    {"table": "wiki_folders", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
-    {"table": "data_sources", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
+    {
+        "table": "embeddings",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "chunks",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "chunk_revisions",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "knowledge_tag_relations",
+        "knowledge_base_column": "",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "knowledge_processing_spans",
+        "knowledge_base_column": "",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "wiki_page_revisions",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
+    {
+        "table": "wiki_page_issues",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
+    {
+        "table": "wiki_pages",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
+    {
+        "table": "wiki_folders",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
+    {
+        "table": "data_sources",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
     {"table": "knowledges", "knowledge_base_column": "", "knowledge_column": "id"},
-    {"table": "kb_shares", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
-    {"table": "knowledge_tags", "knowledge_base_column": "knowledge_base_id", "knowledge_column": ""},
+    {
+        "table": "kb_shares",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
+    {
+        "table": "knowledge_tags",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "",
+    },
 ]
 
 _DEFAULT_ORPHAN_TABLES: List[Dict[str, str]] = [
-    {"table": "embeddings", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
-    {"table": "chunks", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
-    {"table": "chunk_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id"},
+    {
+        "table": "embeddings",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "chunks",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
+    {
+        "table": "chunk_revisions",
+        "knowledge_base_column": "knowledge_base_id",
+        "knowledge_column": "knowledge_id",
+    },
 ]
 
 

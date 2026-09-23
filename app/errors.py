@@ -51,16 +51,22 @@ def error_response(
     http_status: int = status.HTTP_400_BAD_REQUEST,
     details: Any = None,
 ) -> JSONResponse:
-    return JSONResponse(status_code=http_status, content=error_body(error_id, message, details))
+    return JSONResponse(
+        status_code=http_status, content=error_body(error_id, message, details)
+    )
 
 
 # HTTP 400 - the caller sent something unusable
-def bad_request(message: str, error_id: str = "BAD_REQUEST", details: Any = None) -> ForgeError:
+def bad_request(
+    message: str, error_id: str = "BAD_REQUEST", details: Any = None
+) -> ForgeError:
     return ForgeError(error_id, message, status.HTTP_400_BAD_REQUEST, details)
 
 
 # HTTP 401 - could not establish who is calling
-def unauthorized(message: str = "Verification failed", error_id: str = "UNAUTHORIZED") -> ForgeError:
+def unauthorized(
+    message: str = "Verification failed", error_id: str = "UNAUTHORIZED"
+) -> ForgeError:
     return ForgeError(error_id, message, status.HTTP_401_UNAUTHORIZED)
 
 
@@ -73,17 +79,16 @@ def invalid_api_key(message: str = "WeKnora API key is invalid") -> ForgeError:
 
 
 # HTTP 403 - identity is known but not allowed
-def forbidden(message: str = "Permission denied", error_id: str = "FORBIDDEN") -> ForgeError:
+def forbidden(
+    message: str = "Permission denied", error_id: str = "FORBIDDEN"
+) -> ForgeError:
     return ForgeError(error_id, message, status.HTTP_403_FORBIDDEN)
 
 
-# HTTP 404
-def not_found(message: str = "Resource not found", error_id: str = "NOT_FOUND") -> ForgeError:
-    return ForgeError(error_id, message, status.HTTP_404_NOT_FOUND)
-
-
 # HTTP 502 / 504 - WeKnora or PostgreSQL misbehaved
-def upstream_error(message: str, details: Any = None, http_status: int = status.HTTP_502_BAD_GATEWAY) -> ForgeError:
+def upstream_error(
+    message: str, details: Any = None, http_status: int = status.HTTP_502_BAD_GATEWAY
+) -> ForgeError:
     return ForgeError("UPSTREAM_ERROR", message, http_status, details)
 
 
@@ -97,7 +102,9 @@ def install_exception_handlers(app: FastAPI) -> None:
         return error_response(exc.error_id, exc.message, exc.http_status, exc.details)
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    async def _validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
         return error_response(
             "INVALID_REQUEST",
             "Request validation failed",

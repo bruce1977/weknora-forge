@@ -13,7 +13,17 @@ WeKnora releases), every table/column reference can be resolved at runtime throu
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Sequence, Set, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Union,
+)
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -33,7 +43,9 @@ def quote_ident(name: str) -> str:
     from ..config import is_identifier
 
     if not name or not is_identifier(name):
-        raise bad_request(f"Unsafe SQL identifier: {name!r}", error_id="UNSAFE_IDENTIFIER")
+        raise bad_request(
+            f"Unsafe SQL identifier: {name!r}", error_id="UNSAFE_IDENTIFIER"
+        )
     return f'"{name}"'
 
 
@@ -69,7 +81,9 @@ class Executor:
             raise ValueError("Executor needs an engine or a connection")
         self._engine = engine
         self._connection = connection
-        self._column_cache: Dict[str, Set[str]] = column_cache if column_cache is not None else {}
+        self._column_cache: Dict[str, Set[str]] = (
+            column_cache if column_cache is not None else {}
+        )
 
     def _target(self):
         return self._connection if self._connection is not None else self._engine
@@ -92,7 +106,9 @@ class Executor:
             return stmt, values
         return stmt, dict(params or {})
 
-    async def fetch(self, sql: Statement, params: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+    async def fetch(
+        self, sql: Statement, params: Optional[Mapping[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
         stmt, values = self._stmt(sql, params)
         try:
             result = await self._target().execute(stmt, values)
@@ -101,26 +117,23 @@ class Executor:
         rows = result.mappings().all()
         return [{k: _jsonable(v) for k, v in row.items()} for row in rows]
 
-    async def fetch_one(self, sql: Statement, params: Optional[Mapping[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        rows = await self.fetch(sql, params)
-        return rows[0] if rows else None
-
-    async def scalar(self, sql: Statement, params: Optional[Mapping[str, Any]] = None) -> Any:
+    async def scalar(
+        self, sql: Statement, params: Optional[Mapping[str, Any]] = None
+    ) -> Any:
         rows = await self.fetch(sql, params)
         if not rows:
             return None
         return next(iter(rows[0].values()), None)
 
-    async def execute(self, sql: Statement, params: Optional[Mapping[str, Any]] = None) -> int:
+    async def execute(
+        self, sql: Statement, params: Optional[Mapping[str, Any]] = None
+    ) -> int:
         stmt, values = self._stmt(sql, params)
         try:
             result = await self._target().execute(stmt, values)
         except SQLAlchemyError as exc:
             raise database_error(f"Statement failed: {exc}", str(exc)) from exc
         return int(result.rowcount or 0)
-
-    async def set_local(self, key: str, value: Any) -> None:
-        await self.execute(f"SET LOCAL {key} = :value", {"value": value})
 
     async def columns(self, table: str) -> Set[str]:
         """Column names of a table, cached for the lifetime of the process."""
@@ -135,9 +148,6 @@ class Executor:
         if not names:
             logger.warning("table %s not found in information_schema", table)
         return names
-
-    async def table_exists(self, table: str) -> bool:
-        return bool(await self.columns(table))
 
 
 class Database:
@@ -184,9 +194,6 @@ class Database:
             args["ssl"] = sslmode
         return args
 
-    def executor(self) -> Executor:
-        return Executor(engine=self.engine(), column_cache=self._column_cache)
-
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Executor]:
         async with self.engine().begin() as conn:
@@ -216,7 +223,11 @@ class FakeExecutor(Executor):
     Used by the unit tests - the CI environment has no PostgreSQL.
     """
 
-    def __init__(self, rows: Optional[Sequence[Dict[str, Any]]] = None, columns: Optional[Dict[str, Set[str]]] = None):
+    def __init__(
+        self,
+        rows: Optional[Sequence[Dict[str, Any]]] = None,
+        columns: Optional[Dict[str, Set[str]]] = None,
+    ):
         super().__init__(engine=object())  # type: ignore[arg-type]
         self.statements: List[str] = []
         self.params: List[Dict[str, Any]] = []
@@ -232,10 +243,6 @@ class FakeExecutor(Executor):
         self.statements.append(str(sql))
         self.params.append(dict(params or {}))
         return len(self.rows)
-
-    async def set_local(self, key, value):
-        self.statements.append(f"SET LOCAL {key} = :value")
-        self.params.append({"value": value})
 
 
 __all__ = [

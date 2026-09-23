@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.proxy import is_proxy_header
-from tests.conftest import VALIDATE_URL, UPSTREAM, auth_headers
+from tests.conftest import UPSTREAM, auth_headers
 
 # A docker bridge address: inside the default trusted_proxies list
 TRUSTED_PEER = ("172.17.0.1", 51234)
@@ -81,9 +81,9 @@ def test_v1_passthrough_rebuilds_client_headers(make_client):
         return httpx.Response(200, json={"success": True, "data": []})
 
     with respx.mock(assert_all_called=False) as router:
-        router.route(url__regex=r"^http://upstream\.test/api/v1/knowledge-bases(\?.*)?$").mock(
-            side_effect=capture
-        )
+        router.route(
+            url__regex=r"^http://upstream\.test/api/v1/knowledge-bases(\?.*)?$"
+        ).mock(side_effect=capture)
         resp = client.get(
             "/api/v1/knowledge-bases?page=1&page_size=20",
             headers={

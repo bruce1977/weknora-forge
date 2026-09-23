@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -70,7 +69,11 @@ def create_app() -> FastAPI:
     if _swagger_enabled:
         _swagger_dir = Path(__file__).resolve().parent / "static" / "swagger"
         if _swagger_dir.is_dir():
-            app.mount("/static/swagger", StaticFiles(directory=str(_swagger_dir)), name="swagger-ui-static")
+            app.mount(
+                "/static/swagger",
+                StaticFiles(directory=str(_swagger_dir)),
+                name="swagger-ui-static",
+            )
 
             @app.get("/docs", include_in_schema=False)
             async def custom_swagger_ui_html(request: Request) -> HTMLResponse:
@@ -90,8 +93,8 @@ def create_app() -> FastAPI:
     app.add_middleware(ProxyHeadersMiddleware)
 
     # ---- v1 passthrough ----
-    app.include_router(build_proxy_router("/api/v1", config))
-    app.include_router(build_proxy_router("/v1", config))
+    app.include_router(build_proxy_router("/api/v1"))
+    app.include_router(build_proxy_router("/v1"))
 
     # ---- v2 extensions ----
     app.include_router(publish_router.router, prefix="/api/v2")
@@ -124,7 +127,10 @@ def create_app() -> FastAPI:
             "name": "X-Forge-Signature",
             "in": "header",
             "required": True,
-            "schema": {"type": "string", "example": "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH))"},
+            "schema": {
+                "type": "string",
+                "example": "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH))",
+            },
             "description": (
                 "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH)). Generate it with "
                 "scripts/gen_forge_signature.py or scripts/hmac_request.py. "

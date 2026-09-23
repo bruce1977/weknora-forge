@@ -45,7 +45,11 @@ def q(expr: str, metas: dict, builtins: dict | None = None, ci: bool = False) ->
         ("title ENDSWITH 'ora'", {"title": "WeKnora"}, True),
         ("code MATCHES '^A-\\d+$'", {"code": "A-123"}, True),
         ("code MATCHES '^A-\\d+$'", {"code": "B-123"}, False),
-        ("published_at >= '2026-01-01'", {"published_at": "2026-03-05T10:00:00+08:00"}, True),
+        (
+            "published_at >= '2026-01-01'",
+            {"published_at": "2026-03-05T10:00:00+08:00"},
+            True,
+        ),
         ("published_at < '2026-01-01'", {"published_at": "2025-12-31 23:00:00"}, True),
         ("nested.a = 1", {"nested": {"a": 1}}, True),
     ],
@@ -107,12 +111,12 @@ def test_sql_pushdown_postgres():
         builtin_columns={"parse_status": "parse_status"},
     )
     assert "custom_metadata" in sql
-    assert "->> 'level'" in sql            # text form (ordering fallback)
-    assert "-> 'level'" in sql             # jsonb form (native ordering)
-    assert "::jsonb" in sql                # jsonb literal comparisons (value bound as text)
-    assert "LIKE" in sql                   # CONTAINS
-    assert "1=1" in sql                    # regex is not pushed down
-    # jsonb literals travel as JSON text and are cast with ::jsonb in SQL
+    assert "->> 'level'" in sql  # text form (ordering fallback)
+    assert "-> 'level'" in sql  # jsonb form (native ordering)
+    assert "AS jsonb" in sql  # jsonb literal comparisons (value bound as text)
+    assert "LIKE" in sql  # CONTAINS
+    assert "1=1" in sql  # regex is not pushed down
+    # jsonb literals travel as JSON text and are cast with CAST(... AS jsonb) in SQL
     assert set(params.values()) == {"3", "%ai%"}
 
 

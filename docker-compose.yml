@@ -1,7 +1,7 @@
 services:
   forge:
     build: .
-    image: weknora-forge:0.1.0
+    image: weknora-forge:0.2.0
     container_name: weknora-forge
     restart: unless-stopped
     ports:

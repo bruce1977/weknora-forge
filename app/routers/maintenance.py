@@ -19,12 +19,18 @@ router = APIRouter(tags=["v2-purge"])
 async def purge(
     request: Request,
     retention_days: Optional[int] = Query(
-        None, ge=0, le=36500, description="Delete everything whose deleted_at is older than now - N days"
+        None,
+        ge=0,
+        le=36500,
+        description="Delete everything whose deleted_at is older than now - N days",
     ),
     include_embed: Optional[bool] = Query(
-        None, description="Also sweep vector/chunk rows that are no longer attached to a knowledge item"
+        None,
+        description="Also sweep vector/chunk rows that are no longer attached to a knowledge item",
     ),
-    dry_run: Optional[bool] = Query(None, description="Overrides purge.dry_run from config.json"),
+    dry_run: Optional[bool] = Query(
+        None, description="Overrides purge.dry_run from config.json"
+    ),
     auth: Tuple[Principal, str] = Depends(verify_v2),
     config: Config = Depends(config_dep),
     db: Database = Depends(get_db),
@@ -54,9 +60,5 @@ async def purge(
             "orphan_matched": report.orphan_matched,
             "orphan_deleted": report.orphan_deleted,
             "skipped_tables": report.skipped_tables,
-            "sample": {
-                "knowledge_bases": report.knowledge_bases_sample,
-                "knowledges": report.knowledges_sample,
-            },
         },
     }

@@ -163,7 +163,11 @@ class ProxyHeadersMiddleware:
     def _apply(self, scope: Scope) -> None:
         peer = scope.get("client") or ("", 0)
         peer_ip = str(peer[0] or "")
-        info = ProxyInfo(peer_ip=peer_ip, client_ip=peer_ip, scheme=str(scope.get("scheme") or "http"))
+        info = ProxyInfo(
+            peer_ip=peer_ip,
+            client_ip=peer_ip,
+            scheme=str(scope.get("scheme") or "http"),
+        )
         scope[SCOPE_PEER_IP] = peer_ip
 
         if peer_ip not in self.trusted:
@@ -208,32 +212,12 @@ class ProxyHeadersMiddleware:
 # --------------------------------------------------------------------------- #
 # Accessors
 # --------------------------------------------------------------------------- #
-def proxy_info(request: Request) -> ProxyInfo:
-    info = request.scope.get(SCOPE_PROXY)
-    if isinstance(info, ProxyInfo):
-        return info
-    peer = request.client.host if request.client else ""
-    return ProxyInfo(peer_ip=peer, client_ip=peer, scheme=request.url.scheme)
-
-
 def client_ip(request: Request) -> str:
     """Real caller address (proxy aware)."""
     value = request.scope.get(SCOPE_CLIENT_IP)
     if value:
         return str(value)
     return request.client.host if request.client else ""
-
-
-def peer_ip(request: Request) -> str:
-    """Immediate TCP peer - the proxy itself when one is in front."""
-    value = request.scope.get(SCOPE_PEER_IP)
-    if value:
-        return str(value)
-    return request.client.host if request.client else ""
-
-
-def is_trusted_peer(request: Request) -> bool:
-    return bool(request.scope.get(SCOPE_TRUSTED))
 
 
 def request_scheme(request: Request) -> str:

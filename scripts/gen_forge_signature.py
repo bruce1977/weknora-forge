@@ -8,9 +8,8 @@ Forge's second factor is a single header, X-Forge-Signature::
 
 The WeKnora API key (X-API-Key) IS the signing key, so no extra secret is distributed.
 There is no timestamp/nonce: freshness comes from the signature being single use for
-state-changing methods (POST/PUT/PATCH/DELETE) - a replay within
-``auth.signature_cache_ttl_seconds`` is rejected. So generate a FRESH signature for every
-mutating call; GET signatures may be reused.
+state-changing methods (POST/PUT/PATCH/DELETE) - a replay is rejected. So generate a
+FRESH signature for every mutating call; GET signatures may be reused.
 
 The signed payload uses the raw path + raw query exactly as it travels on the wire
 (percent-encoding included) - Forge never normalises either, so an HTTPS-terminating proxy
@@ -45,7 +44,9 @@ def signature_payload(method: str, full_path: str) -> str:
 
 
 def compute_signature(secret: str, payload: str) -> str:
-    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
 
 
 def _build_full_path(path: str, query: str) -> str:
@@ -58,14 +59,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate the Forge X-Forge-Signature header for a v2 request."
     )
-    parser.add_argument("--method", required=True, help="HTTP method, e.g. GET / POST / PUT")
+    parser.add_argument(
+        "--method", required=True, help="HTTP method, e.g. GET / POST / PUT"
+    )
     parser.add_argument(
         "--path",
         required=True,
         help="Request path starting with /; include the query string here or via --query",
     )
-    parser.add_argument("--api-key", required=True, help="WeKnora API key (also the HMAC secret)")
-    parser.add_argument("--query", default="", help="Raw query string (without the leading ?)")
+    parser.add_argument(
+        "--api-key", required=True, help="WeKnora API key (also the HMAC secret)"
+    )
+    parser.add_argument(
+        "--query", default="", help="Raw query string (without the leading ?)"
+    )
     parser.add_argument(
         "--json",
         dest="json_body",
@@ -98,8 +105,8 @@ def main() -> int:
             f"  -H 'X-Forge-Signature: {sig}'",
         ]
         if args.json_body:
-            cmd.append(f" \\")
-            cmd.append(f"  -H 'Content-Type: application/json' \\")
+            cmd.append(" \\")
+            cmd.append("  -H 'Content-Type: application/json' \\")
             cmd.append(f"  -d '{args.json_body}'")
         print("\n".join(cmd))
     return 0

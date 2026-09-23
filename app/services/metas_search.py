@@ -26,13 +26,21 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..config import Config, MetasSearchConfig
 from ..errors import bad_request
 from ..logging import get_logger
 from .db import Executor, quote_ident
-from .meta_dsl import BUILTIN_FIELDS, build_fields, compile_sql, describe, evaluate, parse_query, used_fields
+from .meta_dsl import (
+    BUILTIN_FIELDS,
+    build_fields,
+    compile_sql,
+    describe,
+    evaluate,
+    parse_query,
+    used_fields,
+)
 
 logger = get_logger(__name__)
 
@@ -40,8 +48,7 @@ MAIN_ALIAS = "k"
 KB_ALIAS = "kb"
 TAG_ALIAS = "tag"
 REL_ALIAS = "rel"
-VEC_ALIAS = "vec_agg"
-VEC_INNER_ALIAS = "vec"
+CHUNK_ALIAS = "ch"
 
 # Logical FMQ built-in field -> physical column on the knowledge table.
 BUILTIN_COLUMNS: Dict[str, str] = {
@@ -71,10 +78,9 @@ class SearchRequest:
     page: int = 1
     page_size: int = 20
     case_insensitive: bool = False
-    vector: Optional[Sequence[float]] = None
-    include_deleted: Optional[bool] = None
     title: Optional[str] = None
     tags: Optional[List[str]] = None
+    return_content: bool = False
 
 
 @dataclass
@@ -86,7 +92,6 @@ class SearchResult:
     has_more: bool = False
     scanned: int = 0
     truncated: bool = False
-    similarity: bool = False
     query: str = ""
     sql: str = ""
     ast: Any = None
@@ -126,20 +131,65 @@ class MetasSearchService:
         built = await self._build_query(node, table_columns, req, page_size)
         candidates = await self.ex.fetch(built.sql, built.params)
 
-        matched = [row for row in candidates if self._matches(row, built.internal_keys, node, req.case_insensitive)]
+        matched = [
+            row
+            for row in candidates
+            if self._matches(row, built.internal_keys, node, req.case_insensitive)
+        ]
         total = len(matched)
         start = (page - 1) * page_size
         page_rows = matched[start : start + page_size]
 
+        # Project output columns; expose the full custom_metadata blob as `metas`.
+        rows: List[Dict[str, Any]] = []
+        for row in page_rows:
+            item = {alias: row.get(alias) for alias in built.output_aliases}
+            raw = row.get("_metas")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            item["metas"] = raw
+            if req.return_content:
+                # Prefer knowledges.metadata->>'content' (already projected as
+                # output alias "content"); fall back to concatenated text chunks
+                # for rows where the metadata blob has no content key.
+                content = item.get("content")
+                if content is None:
+                    item["content"] = ""
+                elif not isinstance(content, str):
+                    item["content"] = str(content)
+            rows.append(item)
+
+        # Batch-fetch tag names for just this page (page_size <= max_page_size, typically 20).
+        tag_map = await self._fetch_tag_names(
+            [r.get("id") for r in rows if r.get("id")]
+        )
+        for item in rows:
+            item["tag_names"] = tag_map.get(str(item.get("id")), [])
+
+        if req.return_content:
+            missing = [
+                str(r.get("id")) for r in rows if r.get("id") and not r.get("content")
+            ]
+            if missing:
+                content_map = await self._fetch_chunk_contents(missing)
+                for item in rows:
+                    kid = str(item.get("id") or "")
+                    if kid and not item.get("content"):
+                        item["content"] = content_map.get(kid, "")
+
         return SearchResult(
-            rows=[{alias: row.get(alias) for alias in built.output_aliases} for row in page_rows],
+            rows=rows,
             total=total,
             page=page,
             page_size=page_size,
             has_more=start + page_size < total,
             scanned=len(candidates),
             truncated=len(candidates) >= built.limit,
-            similarity=req.vector is not None,
             query=req.query,
             sql=built.sql,
             ast=describe(node),
@@ -147,10 +197,96 @@ class MetasSearchService:
             order_by=built.order_sql,
         )
 
+    async def _fetch_tag_names(self, ids: List[Any]) -> Dict[str, List[str]]:
+        """Return {knowledge_id: [tag_name, ...]} for a page of knowledge IDs.
+
+        Done as a separate query instead of array_agg in the main SELECT so the
+        primary DISTINCT ON / ORDER BY plan stays untouched. Only the returned
+        page (page_size, max 200) is hit — one indexed lookup on the relation table.
+        """
+        cfg = self.cfg
+        if not ids or not cfg.join.tag_name:
+            return {}
+        tag_columns = await self.ex.columns(cfg.tag_table)
+        if "name" not in tag_columns:
+            return {}
+        relation_columns = await self.ex.columns(cfg.tag_relation_table)
+        if not {"knowledge_id", "tag_id"} <= relation_columns:
+            return {}
+        placeholders = ", ".join(f":forge_tag_id_{i}" for i in range(len(ids)))
+        params = {f"forge_tag_id_{i}": str(v) for i, v in enumerate(ids)}
+        sql = (
+            f"SELECT CAST({REL_ALIAS}.{quote_ident('knowledge_id')} AS TEXT) AS kid, "
+            f"{TAG_ALIAS}.{quote_ident('name')} AS tag_name "
+            f"FROM {quote_ident(cfg.tag_relation_table)} {REL_ALIAS} "
+            f"JOIN {quote_ident(cfg.tag_table)} {TAG_ALIAS} "
+            f"ON {TAG_ALIAS}.{quote_ident('id')} = {REL_ALIAS}.{quote_ident('tag_id')} "
+            f"WHERE CAST({REL_ALIAS}.{quote_ident('knowledge_id')} AS TEXT) IN ({placeholders})"
+        )
+        rows = await self.ex.fetch(sql, params)
+        result: Dict[str, List[str]] = {}
+        for row in rows:
+            kid = str(row.get("kid") or "")
+            name = row.get("tag_name")
+            if kid and name is not None:
+                result.setdefault(kid, []).append(str(name))
+        return result
+
+    async def _fetch_chunk_contents(self, ids: List[str]) -> Dict[str, str]:
+        """Return {knowledge_id: concatenated text-chunk body} for a page of IDs.
+
+        Used only when ``return_content=true`` and the row's
+        ``metadata->>'content'`` was empty (e.g. file uploads without a body
+        key). Page-scoped like the tag lookup so the primary plan is untouched.
+        """
+        cfg = self.cfg
+        if not ids or not cfg.chunk_table:
+            return {}
+        chunk_columns = await self.ex.columns(cfg.chunk_table)
+        if "content" not in chunk_columns:
+            return {}
+        knowledge_col = "knowledge_id" if "knowledge_id" in chunk_columns else None
+        if knowledge_col is None:
+            return {}
+        order_col = "chunk_index" if "chunk_index" in chunk_columns else None
+        order_sql = f"{CHUNK_ALIAS}.{quote_ident(order_col)}" if order_col else "1"
+        placeholders = ", ".join(f":forge_chunk_id_{i}" for i in range(len(ids)))
+        params: Dict[str, Any] = {
+            f"forge_chunk_id_{i}": str(v) for i, v in enumerate(ids)
+        }
+        clauses = [
+            f"CAST({CHUNK_ALIAS}.{quote_ident(knowledge_col)} AS TEXT) IN ({placeholders})"
+        ]
+        if "deleted_at" in chunk_columns:
+            clauses.append(f"{CHUNK_ALIAS}.{quote_ident('deleted_at')} IS NULL")
+        if "chunk_type" in chunk_columns:
+            # Prefer body chunks; ignore generated summary chunks.
+            clauses.append(
+                f"{CHUNK_ALIAS}.{quote_ident('chunk_type')} = :forge_chunk_type"
+            )
+            params["forge_chunk_type"] = "text"
+        sql = (
+            f"SELECT CAST({CHUNK_ALIAS}.{quote_ident(knowledge_col)} AS TEXT) AS kid, "
+            f"string_agg({CHUNK_ALIAS}.{quote_ident('content')}, '' ORDER BY {order_sql}) AS body "
+            f"FROM {quote_ident(cfg.chunk_table)} {CHUNK_ALIAS} "
+            f"WHERE {' AND '.join(clauses)} "
+            f"GROUP BY {CHUNK_ALIAS}.{quote_ident(knowledge_col)}"
+        )
+        rows = await self.ex.fetch(sql, params)
+        result: Dict[str, str] = {}
+        for row in rows:
+            kid = str(row.get("kid") or "")
+            body = row.get("body")
+            if kid and body is not None:
+                result[kid] = str(body)
+        return result
+
     # ------------------------------------------------------------------ #
     # Query construction
     # ------------------------------------------------------------------ #
-    async def _build_query(self, node, table_columns: Set[str], req: SearchRequest, page_size: int) -> "BuiltQuery":
+    async def _build_query(
+        self, node, table_columns: Set[str], req: SearchRequest, page_size: int
+    ) -> "BuiltQuery":
         cfg = self.cfg
         joins, join_expressions = await self._resolve_joins(table_columns)
         projections: List[str] = []
@@ -165,23 +301,33 @@ class MetasSearchService:
         # Hidden: the whole metadata blob, needed for the exact Python evaluation
         add("_metas", f"{MAIN_ALIAS}.{quote_ident(cfg.metadata_column)}", hidden=True)
 
+        # return_content: original body lives in knowledges.metadata->>'content'
+        # (WeKnora stores the publish body there; chunks are only a fallback).
+        if req.return_content:
+            if "content" in table_columns:
+                add("content", f"{MAIN_ALIAS}.{quote_ident('content')}")
+            elif "metadata" in table_columns:
+                add(
+                    "content",
+                    f"CAST({MAIN_ALIAS}.{quote_ident('metadata')} AS jsonb) ->> 'content'",
+                )
+            else:
+                add("content", "NULL::text")
+
         internal_keys: Dict[str, str] = {}
         for logical, column in BUILTIN_COLUMNS.items():
             used = any(f == f"${logical}" for f in used_fields(node))
             if column not in table_columns:
                 continue
-            if not (used or column in BASE_INTERNAL_COLUMNS or logical in BUILTIN_FIELDS):
+            if not (
+                used or column in BASE_INTERNAL_COLUMNS or logical in BUILTIN_FIELDS
+            ):
                 continue
             alias = f"_b_{column}"
             internal_keys[logical] = alias
             add(alias, f"{MAIN_ALIAS}.{quote_ident(column)}", hidden=True)
 
-        similarity_expr = self._build_vector_clause(req, joins)
-        add("similarity", similarity_expr, hidden="similarity" not in cfg.result_column)
-
         for name in cfg.result_column:
-            if name == "similarity":
-                continue  # already projected above
             alias = self._safe_alias(name)
             expression = self._result_expression(name, join_expressions, table_columns)
             if expression is None:
@@ -189,10 +335,12 @@ class MetasSearchService:
                 continue
             add(alias, expression)
 
-        where_sql, params, order_sql = await self._build_filters(node, table_columns, req, joins, params_vector=None)
+        where_sql, params, order_sql = await self._build_filters(
+            node, table_columns, req, joins, distinct_on=True
+        )
         limit = max(cfg.max_rows, page_size)
         sql = (
-            f"SELECT {', '.join(projections)} "
+            f"SELECT DISTINCT ON ({MAIN_ALIAS}.{quote_ident('id')}) {', '.join(projections)} "
             f"FROM {quote_ident(cfg.table)} {MAIN_ALIAS} "
             f"{where_sql} {order_sql} LIMIT {limit}"
         )
@@ -214,8 +362,12 @@ class MetasSearchService:
         if name in join_expressions:
             return join_expressions[name]
         if name == "file_name":
-            candidate = next((c for c in cfg.file_name_candidate if c in table_columns), None)
-            return f"{MAIN_ALIAS}.{quote_ident(candidate)}" if candidate else "NULL::text"
+            candidate = next(
+                (c for c in cfg.file_name_candidate if c in table_columns), None
+            )
+            return (
+                f"{MAIN_ALIAS}.{quote_ident(candidate)}" if candidate else "NULL::text"
+            )
         if name in table_columns:
             return f"{MAIN_ALIAS}.{quote_ident(name)}"
         # Unknown name: expose it straight out of custom_metadata (a.b paths included)
@@ -224,30 +376,12 @@ class MetasSearchService:
             return None
         head = "".join(f" -> '{p.replace(chr(39), chr(39) * 2)}'" for p in parts[:-1])
         tail = parts[-1].replace("'", "''")
-        return f"({MAIN_ALIAS}.{quote_ident(cfg.metadata_column)})::jsonb{head} ->> '{tail}'"
+        return f"CAST(({MAIN_ALIAS}.{quote_ident(cfg.metadata_column)}) AS jsonb){head} ->> '{tail}'"
 
     # ------------------------------------------------------------------ #
-    def _build_vector_clause(self, req: SearchRequest, joins: List[str]) -> str:
-        cfg = self.cfg.vector
-        if not req.vector:
-            return "NULL::float8"
-        literal = "[" + ",".join(f"{float(v):.10g}" for v in req.vector) + "]"
-        self._vector_literal = literal
-        distance = (
-            f"MIN({VEC_INNER_ALIAS}.{quote_ident(cfg.column)} "
-            f"{cfg.distance_operator} CAST(:forge_vector AS vector))"
-        )
-        joins.append(
-            f"LEFT JOIN LATERAL ("
-            f"SELECT {distance} AS _distance "
-            f"FROM {quote_ident(cfg.table)} {VEC_INNER_ALIAS} "
-            f"WHERE {VEC_INNER_ALIAS}.{quote_ident(cfg.knowledge_column)} = {MAIN_ALIAS}.{quote_ident('id')}"
-            f") {VEC_ALIAS} ON TRUE"
-        )
-        return cfg.similarity_expression.replace("{distance}", f"{VEC_ALIAS}._distance")
-
-    # ------------------------------------------------------------------ #
-    async def _resolve_joins(self, table_columns: Set[str]) -> Tuple[List[str], Dict[str, str]]:
+    async def _resolve_joins(
+        self, table_columns: Set[str]
+    ) -> Tuple[List[str], Dict[str, str]]:
         """Return (join clauses, alias -> expression) for knowledge base / tag names."""
         cfg = self.cfg
         joins: List[str] = []
@@ -260,7 +394,7 @@ class MetasSearchService:
                     f"LEFT JOIN {quote_ident(cfg.knowledge_base_table)} {KB_ALIAS} "
                     f"ON {KB_ALIAS}.{quote_ident('id')} = {MAIN_ALIAS}.{quote_ident('knowledge_base_id')}"
                 )
-                expressions["kb_name"] = f'{KB_ALIAS}.{quote_ident("name")}'
+                expressions["kb_name"] = f"{KB_ALIAS}.{quote_ident('name')}"
 
         if cfg.join.tag_name:
             tag_columns = await self.ex.columns(cfg.tag_table)
@@ -275,13 +409,13 @@ class MetasSearchService:
                         f"LEFT JOIN {quote_ident(cfg.tag_table)} {TAG_ALIAS} "
                         f"ON {TAG_ALIAS}.{quote_ident('id')} = {REL_ALIAS}.{quote_ident('tag_id')}"
                     )
-                    expressions["tag_name"] = f'{TAG_ALIAS}.{quote_ident("name")}'
+                    expressions["tag_name"] = f"{TAG_ALIAS}.{quote_ident('name')}"
                 elif "tag_id" in table_columns:
                     joins.append(
                         f"LEFT JOIN {quote_ident(cfg.tag_table)} {TAG_ALIAS} "
                         f"ON {TAG_ALIAS}.{quote_ident('id')} = {MAIN_ALIAS}.{quote_ident('tag_id')}"
                     )
-                    expressions["tag_name"] = f'{TAG_ALIAS}.{quote_ident("name")}'
+                    expressions["tag_name"] = f"{TAG_ALIAS}.{quote_ident('name')}"
         return joins, expressions
 
     # ------------------------------------------------------------------ #
@@ -291,7 +425,7 @@ class MetasSearchService:
         table_columns: Set[str],
         req: SearchRequest,
         joins: List[str],
-        params_vector: Optional[Dict[str, Any]],
+        distinct_on: bool = False,
     ) -> Tuple[str, Dict[str, Any], str]:
         cfg = self.cfg
         builtins = {
@@ -307,21 +441,27 @@ class MetasSearchService:
         )
         clauses: List[str] = [f"({where_sql})"]
 
-        include_deleted = cfg.include_deleted if req.include_deleted is None else req.include_deleted
-        if not include_deleted and "deleted_at" in table_columns:
+        if "deleted_at" in table_columns:
             clauses.append(f"{MAIN_ALIAS}.{quote_ident('deleted_at')} IS NULL")
 
         if req.kb_ids:
-            params["forge_kb_ids"] = [str(k) for k in req.kb_ids]
+            kb_list = [str(k) for k in req.kb_ids]
+            placeholders = []
+            for i, kid in enumerate(kb_list):
+                key = f"forge_kb_id_{i}"
+                params[key] = kid
+                placeholders.append(f":{key}")
             clauses.append(
-                f"CAST({MAIN_ALIAS}.{quote_ident('knowledge_base_id')} AS TEXT) IN :forge_kb_ids"
+                f"CAST({MAIN_ALIAS}.{quote_ident('knowledge_base_id')} AS TEXT) IN ({', '.join(placeholders)})"
             )
 
         # Title search filter
         if req.title:
             title_op = "ILIKE" if req.case_insensitive else "LIKE"
             params["forge_title"] = f"%{req.title}%"
-            clauses.append(f"{MAIN_ALIAS}.{quote_ident('title')} {title_op} :forge_title")
+            clauses.append(
+                f"{MAIN_ALIAS}.{quote_ident('title')} {title_op} :forge_title"
+            )
 
         # Tags filter
         if req.tags:
@@ -353,45 +493,42 @@ class MetasSearchService:
         if cfg.extra_where.strip():
             clauses.append(f"({cfg.extra_where.strip()})")
 
-        if getattr(self, "_vector_literal", None):
-            params["forge_vector"] = self._vector_literal
-
         from_sql = " ".join(joins).strip()
         where = "WHERE " + " AND ".join(clauses)
-        return f"{from_sql} {where}".strip(), params, self._order_sql(table_columns)
+        return (
+            f"{from_sql} {where}".strip(),
+            params,
+            self._order_sql(table_columns, distinct_on=distinct_on),
+        )
 
     # ------------------------------------------------------------------ #
-    def _order_sql(self, table_columns: Set[str]) -> str:
+    def _order_sql(self, table_columns: Set[str], distinct_on: bool = False) -> str:
         """Ordering comes from config; unknown columns are skipped, never fatal."""
         parts: List[str] = []
+        if distinct_on:
+            parts.append(f"{MAIN_ALIAS}.{quote_ident('id')}")
         for spec in self.cfg.default_order:
             name = (spec.column or "").strip()
             if not name:
                 continue
             direction = "DESC" if spec.desc else "ASC"
-            if name == "similarity":
-                parts.append(f'{quote_ident("similarity")} {direction} NULLS LAST')
-            elif name in table_columns or name in {"kb_name", "tag_name"}:
-                parts.append(f"{quote_ident(name)} {direction} NULLS LAST")
+            if name in table_columns or name in {"kb_name", "tag_name"}:
+                # Qualify with main alias to avoid ambiguity from JOINs
+                col = (
+                    f"{MAIN_ALIAS}.{quote_ident(name)}"
+                    if name in table_columns
+                    else quote_ident(name)
+                )
+                parts.append(f"{col} {direction} NULLS LAST")
         if not parts and "updated_at" in table_columns:
-            parts.append(f'{quote_ident("updated_at")} DESC NULLS LAST')
+            parts.append(f"{MAIN_ALIAS}.{quote_ident('updated_at')} DESC NULLS LAST")
         return "ORDER BY " + ", ".join(parts) if parts else ""
 
     # ------------------------------------------------------------------ #
-    async def apply_index_hints(self) -> None:
-        """SET LOCAL knobs requested by config (applied inside the request transaction)."""
-        cfg = self.cfg.vector
-        if cfg.default_probes > 0:
-            await self.ex.set_local("ivfflat.probes", cfg.default_probes)
-        if cfg.default_ef_search > 0:
-            await self.ex.set_local("hnsw.ef_search", cfg.default_ef_search)
-        if cfg.default_beam_factor > 0:
-            await self.ex.set_local("hnsw.iterative_scan", "relaxed_ordered")
-            await self.ex.set_local("hnsw.max_scan_tuples", cfg.default_beam_factor * 1000)
-
-    # ------------------------------------------------------------------ #
     @staticmethod
-    def _matches(row: Dict[str, Any], internal_keys: Dict[str, str], node, case_insensitive: bool) -> bool:
+    def _matches(
+        row: Dict[str, Any], internal_keys: Dict[str, str], node, case_insensitive: bool
+    ) -> bool:
         raw = row.get("_metas")
         if isinstance(raw, str):
             try:
@@ -417,7 +554,3 @@ class BuiltQuery:
     internal_keys: Dict[str, str]
     order_sql: str
     limit: int
-
-
-def builtin_field_names() -> List[str]:
-    return sorted(f"${name}" for name in BUILTIN_FIELDS)

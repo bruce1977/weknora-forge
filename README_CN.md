@@ -17,7 +17,7 @@ WeKnora 原生 API 的**扩展层**：在一层薄代理之上补齐原生能力
 | --- | --- | --- |
 | 除 API Key 外没有第二重凭证 | HMAC-SHA256 签名头，密钥即 API Key | 全部 v1 / v2 路由 |
 | 手动知识需「建草稿 → 写元数据 → 发布」多步编排 | 服务端一次调用完成，失败回滚 | `POST /api/v2/publish` |
-| 只能按标题/标签/时间过滤，无法检索 `custom_metadata` | FMQ 查询语法 → PostgreSQL JSONB 下推 | `POST·GET /api/v2/knowledge/search` |
+| 只能按标题/标签/时间过滤，无法检索 `custom_metadata` | FMQ 查询语法 → PostgreSQL JSONB 下推 | `POST /api/v2/knowledge/search` |
 | 只做软删（写 `deleted_at`），没有物理清理 | 按表顺序级联物理删除 + 孤儿向量清理 | `DELETE /api/v2/management/purge` |
 
 ---
@@ -39,14 +39,14 @@ curl http://localhost:8000/api/v2/health           # 开放端点，无需签名
 python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt   # Windows
 # source .venv/bin/activate && pip install -r requirements-dev.txt          # Linux/macOS
 
-uvicorn app.main:app --reload --port 8000 --no-proxy-headers
+python -m uvicorn app.main:app --reload --port 8000 --no-proxy-headers --env-file .env
 python scripts/show_config.py                       # 看生效配置（密钥已打码）
 ```
 
 > 必须带 `--no-proxy-headers`：转发头由 `app/proxy.py` 统一处理，uvicorn 自己处理只看 127.0.0.1，
 > 会把容器/内网隧道来的 `X-Forwarded-*` 全部忽略（详见第 3 节）。
 
-测试：`python -m pytest tests -q`（**92 项**，上游用 respx 模拟，不需要真实 WeKnora 与数据库）。
+测试：`python -m pytest tests -q`（**97 通过 / 2 跳过**，live 需 `WEKNORA_BASE_URL`；其余用 respx 模拟，不需要真实 WeKnora 与数据库）。
 
 ---
 
@@ -67,8 +67,6 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 | `POST` | `/api/v2/publish` | HMAC | 发布知识（支持多标签） |
 | **v2 元数据搜索** | | | |
 | `POST` | `/api/v2/knowledge/search` | HMAC | 按元数据、标题、标签搜索 |
-| `POST` | `/api/v2/metas/parse` | HMAC | 解析 FMQ 表达式 |
-| `GET` | `/api/v2/metas/grammar` | HMAC | FMQ 语法参考 |
 | **v2 维护** | | | |
 | `DELETE` | `/api/v2/management/purge` | HMAC | 清理软删除数据 |
 
@@ -139,16 +137,21 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
 ```JSON
 {
   "success": true,
-  "weknora": {
-    "ok": true,
-    "knowledge_base_count": 4,
-    "latency_ms": 120.5
-  },
-  "database": {
-    "ok": true,
-    "latency_ms": 15.2
-  },
-  "auth_method": "hmac"
+  "data": {
+    "weknora": {
+      "message": "WeKnora is reachable",
+      "upstream": "http://localhost:8080",
+      "upstream_status": 200,
+      "latency_ms": 120.5,
+      "knowledge_base_count": 4
+    },
+    "database": {
+      "ok": true,
+      "message": "PostgreSQL is reachable",
+      "latency_ms": 15.2
+    },
+    "auth_method": "hmac"
+  }
 }
 ```
 
@@ -157,16 +160,20 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
 ```JSON
 {
   "success": false,
-  "weknora": {
-    "ok": false,
-    "error": "Connection refused",
-    "upstream_status": 502
-  },
-  "database": {
-    "ok": true,
-    "latency_ms": 12.1
-  },
-  "auth_method": "hmac"
+  "data": {
+    "weknora": {
+      "message": "Upstream unreachable: Connection refused",
+      "upstream": "http://localhost:8080",
+      "upstream_status": 502,
+      "latency_ms": 3.1
+    },
+    "database": {
+      "ok": true,
+      "message": "PostgreSQL is reachable",
+      "latency_ms": 12.1
+    },
+    "auth_method": "hmac"
+  }
 }
 ```
 
@@ -241,20 +248,20 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 
 #### `POST /api/v2/knowledge/search` {#post-api-v2-knowledge-search}
 
-按自定义元数据、标题和标签搜索知识。`metas_query` 字段接受 FMQ 表达式用于自定义元数据过滤，`title` 字段支持文章标题全文搜索，`tags` 字段按标签名称过滤。
+按自定义元数据、标题和标签搜索知识。`metas_query` 字段接受 FMQ 表达式用于自定义元数据过滤，`title` 字段支持文章标题全文搜索，`tags` 字段按标签名称过滤。完整查询语法详见 [FMQ.md](./FMQ.md)。
 
 **请求**
 
 ```JSON
 {
-  "kb_id": "kb-00000001",
+  "kb_ids": ["kb-00000001"],
   "metas_query": "level >= 3 AND category = 'ops'",
   "title": "Milvus",
   "tags": ["ai", "db"],
   "page": 1,
   "page_size": 20,
   "case_insensitive": true,
-  "include_deleted": false
+  "return_content": false
 }
 ```
 
@@ -264,61 +271,27 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 {
   "success": true,
   "data": {
-    "rows": [
+    "items": [
       {
         "id": "k-00000001",
         "title": "Milvus 集群部署指南",
-        "custom_metadata": {...},
-        "similarity": 0.95
+        "kb_name": "测试数据库",
+        "metas": {"level": 3, "category": "ops", "hashcode": "abc123"},
+        "tag_names": ["ai", "db"]
       }
     ],
     "total": 100,
     "page": 1,
     "page_size": 20,
-    "has_more": true,
-    "scanned": 150,
-    "truncated": false
+    "has_more": true
   }
 }
 ```
 
----
-
-#### `POST /api/v2/metas/parse` {#post-api-v2-metas-parse}
-
-解析 FMQ 表达式并返回 AST（调试工具）。
-
-**请求**
-
-```JSON
-{
-  "query": "level >= 3 AND tags CONTAINS 'ai'"
-}
-```
-
-**响应**
-
-```JSON
-{
-  "success": true,
-  "data": {
-    "query": "level >= 3 AND tags CONTAINS 'ai'",
-    "ast": {...},
-    "fields": ["level", "tags"]
-  }
-}
-```
-
----
-
-#### `GET /api/v2/metas/grammar` {#get-api-v2-metas-grammar}
-
-返回 FMQ 语法参考和内置字段列表。
-
-```bash
-curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
-  http://localhost:8000/api/v2/metas/grammar
-```
+**说明**
+- `kb_ids` 为必填项，且必须是当前 API KEY 可访问的知识库（通过 WeKnora `GET /knowledge-bases` 校验）。若无权限返回 403 `KB_ACCESS_DENIED`。
+- 响应条目包含 `id`、`title`、`kb_name`、`metas`（每条命中的完整 custom_metadata）、`tag_names`（全部标签，数组）。
+- 设 `return_content: true` 可额外返回正文 `items[].content`（优先取 `knowledges.metadata->>'content'`，为空时拼接 `chunks.content`）。默认 `false`，保持响应精简。
 
 ---
 
@@ -342,12 +315,29 @@ curl -H "X-API-Key: sk-xxx" -H "X-Forge-Signature: ..." \
 {
   "success": true,
   "data": {
-    "matched": 150,
-    "deleted": 150,
-    "orphan_matched": 500,
-    "orphan_deleted": 500,
-    "skipped_tables": [],
-    "sample": ["k-00000001", "k-00000002"]
+    "dry_run": true,
+    "retention_days": 30,
+    "cutoff": "2026-08-24T00:00:00+00:00",
+    "include_embed": false,
+    "counts": {
+      "knowledge_bases": 0,
+      "knowledges": 150
+    },
+    "matched": {
+      "knowledges": 150,
+      "embeddings": 500
+    },
+    "deleted": {
+      "knowledges": 0,
+      "embeddings": 0
+    },
+    "orphan_matched": {
+      "embeddings (orphan)": 500
+    },
+    "orphan_deleted": {
+      "embeddings (orphan)": 0
+    },
+    "skipped_tables": []
   }
 }
 ```
@@ -426,15 +416,14 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "wait_until": "enabled", "timeout_seconds": 90,
+  "publish":  { "wait_until": "enabled", "timeout_seconds": 300,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
                 "user": "${DB_USER:-postgres}", "password": "${DB_PASSWORD:-}", "name": "${DB_NAME:-WeKnora}",
-                "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "statement_timeout_ms": 30000 },
-  "metas_search": { "table": "knowledges", "metadata_column": "custom_metadata", "include_deleted": false,
-                    "result_column": ["id", "title", "file_name", "similarity", "kb_name", "tag_name"],
-                    "vector": { "distance_operator": "<=>", "similarity_expression": "1 - ({distance})" },
+                "sslmode": "${DB_SSLMODE:-disable}", "pool_size": 5, "max_overflow": 5, "statement_timeout_ms": 30000 },
+  "metas_search": { "table": "knowledges", "metadata_column": "custom_metadata",
+                    "result_column": ["id", "title", "file_name", "kb_name", "tag_name"],
                     "max_rows": 5000, "default_page_size": 20, "extra_where": "" },
   "purge":    { "dry_run": true, "default_retention_days": 30, "include_embed": false, "max_rows": 200000,
                 "tables": [ /* 见第 7 节 */ ], "orphan_tables": [ /* ... */ ] }
@@ -447,7 +436,7 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 - `swagger.enabled`：控制 Swagger UI 与 OpenAPI 文档的开关。设 `SWAGGER_ENABLED=false`
   （或 `0` / `no` / `off`）可彻底关闭 `GET /docs` 与 `GET /openapi.json`，便于生产环境隐藏接口文档。
   默认 `true`。UI 资源本地化内置（`app/static/swagger`，来自 `swagger-ui-dist@5.17.14`），无需任何外网 CDN 即可渲染。
-- `metas_search.extra_where` / `vector.similarity_expression` / `purge.tables` 是**服务端**配置，
+- `metas_search.extra_where` / `purge.tables` 是**服务端**配置，
   含 SQL 片段，绝不能暴露给调用方；表名列名只做标识符白名单校验。
 - `database.sslmode` 用 asyncpg 的取值（`disable|allow|prefer|require|verify-ca|verify-full`），
   Forge 会把它作为 `ssl` 连接参数传给 asyncpg（**不能**写进 DSN 的 query，asyncpg 不认 `sslmode`）。
@@ -460,8 +449,10 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
 {"success": false, "error_id": "UPSTREAM_ERROR", "error_message": "...", "details": {...}}
 ```
 
-常见 `error_id`：`INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZED` / `UPSTREAM_ERROR` /
-`DATABASE_ERROR` / `DB_NOT_CONFIGURED` / `UNSAFE_IDENTIFIER` / `INVALID_RETENTION_DAYS` / `BAD_REQUEST`。
+常见 `error_id`：`INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZED` / `FORBIDDEN` /
+`KB_ACCESS_DENIED` / `UPSTREAM_ERROR` / `DATABASE_ERROR` / `DB_NOT_CONFIGURED` / `UNSAFE_IDENTIFIER` /
+`TABLE_NOT_FOUND` / `METADATA_COLUMN_MISSING` / `TAG_NOT_FOUND` / `PURGE_LIMIT_EXCEEDED` /
+`INVALID_RETENTION_DAYS` / `INVALID_REQUEST` / `INTERNAL_ERROR` / `BAD_REQUEST`。
 
 ---
 
@@ -474,17 +465,21 @@ app/
 ├── config.py              # config.json 加载 + ${ENV} 展开（自动查找 data/config.json）
 ├── security.py            # 二次验证（HMAC over METHOD + FULL_PATH）
 ├── upstream.py            # WeKnora 客户端（透传、语义化调用、API Key 校验缓存）
+├── schemas.py             # 请求/响应模型（发布、元数据检索）
+├── logging.py             # 日志初始化
 ├── deps.py / errors.py    # 依赖注入 / 错误信封
 ├── routers/               # proxy_v1 / publish / metas / maintenance / system
 └── services/
     ├── db.py              # PostgreSQL 引擎与 Executor（含测试替身 FakeExecutor）
     ├── meta_dsl.py        # FMQ 词法 + 语法 + 求值 + jsonb SQL 下推
-    ├── metas_search.py    # 元数据检索（SQL 组装、分页、向量评分）
+    ├── metas_search.py    # 元数据检索（SQL 组装、分页）
     ├── publish_service.py # 发布编排（tags → 草稿 → 元数据 → 发布 → 可选等待）
     └── purge_service.py   # 物理清理（级联删除 + 孤儿清理）
-scripts/                   # hmac_request.py（签名请求助手）/ show_config.py
-tests/                     # 92 项，respx 模拟上游
-data/                      # 运行时数据（config.json、.keys 等）
+scripts/                   # gen_forge_signature.py / hmac_request.py / show_config.py
+tests/                     # 97 项（live 跳过 2），respx 模拟上游
+FMQ.md                     # FMQ 查询语法完整参考
+pyproject.toml             # pytest 配置（asyncio_mode、testpaths）
+data/                      # 运行时数据（config.json 等）
 ```
 
 ---
@@ -496,7 +491,7 @@ data/                      # 运行时数据（config.json、.keys 等）
 - **v1 透传会在内存中缓冲请求体**：单个大文件上传（经 Cloudflare 还有 100 MB 上限）建议内网直连
   WeKnora；v1 的响应是流式的，不受影响。
 - **元数据检索直连 PostgreSQL**：WeKnora 升级若改表结构，用 `config.json → metas_search`
-  调整表名/列名即可，不必改代码；`include_deleted=false` 时默认不返回软删记录。
+  调整表名/列名即可，不必改代码；软删记录始终排除。
 - **purge 只覆盖数据库行**：`include_embed=true` 会顺手清理无关联的向量/分块，但向量库自身
   （Milvus 等）的残留索引仍可能需要按上游工具处理。
 - **v1 透传不改请求/响应体**，原生接口的能力限制依旧存在（这正是 v2 扩展存在的理由）。
