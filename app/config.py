@@ -70,7 +70,7 @@ def is_identifier(value: str) -> bool:
 class ServiceConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
-    log_level: str = "${LOG_LEVEL:-INFO}"
+    log_level: str = "INFO"
     workers: int = 1
 
 
