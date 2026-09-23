@@ -1,0 +1,103 @@
+{
+  "service": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "log_level": "INFO",
+    "workers": 1
+  },
+
+  "swagger": {
+    "enabled": "${SWAGGER_ENABLED:-true}"
+  },
+
+  "upstream": {
+    "base_url": "${WEKNORA_BASE_URL:-http://localhost:8080}",
+    "api_prefix": "/api/v1",
+    "timeout_seconds": 60,
+    "api_key_validate_path": "/knowledge-bases?page=1&page_size=1",
+    "forward_request_id": true
+  },
+
+    "auth": {
+      "mode": "hmac",
+      "require_on_v1": true,
+      "require_on_v2": true,
+      "hmac_header_signature": "X-Forge-Signature"
+    },
+
+  "publish": {
+    "wait_until": "enabled",
+    "timeout_seconds": 90,
+    "poll_interval_seconds": 3.0,
+    "default_channel": "api",
+    "merge_metas": true,
+    "rollback_on_failure": true
+  },
+
+  "database": {
+    "dsn": "${FORGE_DB_DSN:-}",
+    "host": "${DB_HOST:-localhost}",
+    "port": "${DB_PORT:-5432}",
+    "user": "${DB_USER:-postgres}",
+    "password": "${DB_PASSWORD:-}",
+    "name": "${DB_NAME:-WeKnora}",
+    "sslmode": "${DB_SSLMODE:-disable}",
+    "pool_size": 5,
+    "max_overflow": 5,
+    "statement_timeout_ms": 30000
+  },
+
+  "metas_search": {
+    "table": "knowledges",
+    "metadata_column": "custom_metadata",
+    "knowledge_base_table": "knowledge_bases",
+    "tag_table": "knowledge_tags",
+    "tag_relation_table": "knowledge_tag_relations",
+    "chunk_table": "chunks",
+
+    "join": {
+      "knowledge_base_name": true,
+      "tag_name": true
+    },
+
+    "result_column": ["id", "title", "file_name", "kb_name", "tag_name"],
+    "file_name_candidate": ["file_name", "filename", "file_path", "source_url", "source", "title"],
+
+    "default_order": [
+      { "column": "updated_at", "desc": true }
+    ],
+    "max_rows": 5000,
+    "default_page_size": 20,
+    "max_page_size": 200,
+    "extra_where": ""
+  },
+
+  "purge": {
+    "dry_run": true,
+    "default_retention_days": 30,
+    "include_embed": false,
+    "max_rows": 200000,
+
+    "tables": [
+      { "table": "embeddings", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" },
+      { "table": "chunks", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" },
+      { "table": "chunk_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" },
+      { "table": "knowledge_tag_relations", "knowledge_base_column": "", "knowledge_column": "knowledge_id" },
+      { "table": "knowledge_processing_spans", "knowledge_base_column": "", "knowledge_column": "knowledge_id" },
+      { "table": "wiki_page_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "wiki_page_issues", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "wiki_pages", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "wiki_folders", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "data_sources", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "knowledges", "knowledge_base_column": "", "knowledge_column": "id" },
+      { "table": "kb_shares", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" },
+      { "table": "knowledge_tags", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "" }
+    ],
+
+    "orphan_tables": [
+      { "table": "embeddings", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" },
+      { "table": "chunks", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" },
+      { "table": "chunk_revisions", "knowledge_base_column": "knowledge_base_id", "knowledge_column": "knowledge_id" }
+    ]
+  }
+}

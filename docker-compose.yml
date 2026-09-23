@@ -1,33 +1,14 @@
 services:
-  forge:
+  weknora-forge:
     build: .
-    image: weknora-forge:0.2.0
-    container_name: weknora-forge
-    restart: unless-stopped
+    image: bruce1977/weknora-forge:latest
     ports:
-      # Forge only ever speaks plain HTTP; HTTPS is terminated upstream (Cloudflare).
-      # Publishing on 0.0.0.0 keeps internal callers (LAN, other hosts) working. If the
-      # only traffic source is a tunnel on this host, tighten it to "127.0.0.1:8000:8000"
-      # so nothing else can reach the service and spoof X-Forwarded-* headers.
-      # 8000 is taken by the local correct-cn container; map host 8001 -> container 8000.
-      - "8001:8000"
+      - "8000:8000"
+    volumes:
+      # Read-only mount of the Forge config (FORGE_CONFIG=/data/config.json in the image).
+      # Place your production config.json on the host at /data/config.json.
+      - /data:/data:ro
     env_file:
       - .env
-    environment:
-      # Reach WeKnora on the host from inside the container (if WeKnora is also in this
-      # compose file, use the service name instead: http://weknora:8080)
-      WEKNORA_BASE_URL: ${WEKNORA_BASE_URL:-http://host.docker.internal:8080}
-      # config.json lives in the image; mount your own to change it without a rebuild
-      FORGE_CONFIG: ${FORGE_CONFIG:-/data/config.json}
-    volumes:
-      - forge-data:/data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/',timeout=2)"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-
-volumes:
-  forge-data:
+    environment:            # Set default LOG_LEVEL here if present
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}

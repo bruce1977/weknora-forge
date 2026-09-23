@@ -1,18 +1,13 @@
 .venv/
-venv/
 __pycache__/
-*.py[cod]
 .pytest_cache/
-.env
-.debug
-/data/
-var/
-*.db
-*.sqlite3
-.tmp-docs/
+.ruff_cache/
 .idea/
 .vscode/
 .workbuddy/
-.tmp*/
+.docker/
 
-
+.env
+.debug
+*.db
+*.sqlite3
