@@ -107,7 +107,7 @@ class PublishService:
             latest = published or {}
 
             # ---------------- 2.4 wait ----------------
-            if settings.wait and knowledge_id:
+            if settings.poll_interval_seconds > 0 and knowledge_id:
                 latest = await self._wait(knowledge_id, api_key)
 
             return PublishResult(

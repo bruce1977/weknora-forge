@@ -126,7 +126,6 @@ class AuthConfig(BaseModel):
 class PublishConfig(BaseModel):
     """Server-side behaviour of POST /api/v2/publish."""
 
-    wait: bool = True
     wait_until: Literal["enabled", "completed", "terminal"] = "enabled"
     timeout_seconds: int = 300
     poll_interval_seconds: float = 3.0

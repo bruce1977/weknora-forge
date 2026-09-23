@@ -154,7 +154,7 @@ def test_publish_ignores_removed_request_parameters(client):
 def test_publish_waits_when_configured(client):
     from tests.conftest import write_config
 
-    write_config({"publish": {"wait": True, "wait_until": "enabled", "timeout_seconds": 2, "poll_interval_seconds": 0.01}})
+    write_config({"publish": {"wait_until": "enabled", "timeout_seconds": 2, "poll_interval_seconds": 0.01}})
     try:
         body = {"kb_id": "kb-1", "title": "t", "content": "c"}
         polls = {"count": 0}
@@ -181,7 +181,7 @@ def test_publish_waits_when_configured(client):
         assert resp.json()["enable_status"] == "enabled"
         assert polls["count"] >= 2
     finally:
-        write_config({"publish": {"wait": False}})
+        write_config({"publish": {"poll_interval_seconds": 0}})
 
 
 def test_publish_reuses_existing_tag_when_create_conflicts(client):

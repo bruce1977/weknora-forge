@@ -29,7 +29,6 @@ BASE_CONFIG: Dict[str, Any] = {
         "require_on_v2": True,
     },
     "publish": {
-        "wait": False,
         "wait_until": "enabled",
         "timeout_seconds": 5,
         "poll_interval_seconds": 0.01,

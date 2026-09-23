@@ -236,8 +236,8 @@ Executes the full publish orchestration: resolve tag names â†’ create/get tags â
 }
 ```
 
-> With `publish.wait=true` the call blocks until post-processing finishes. Behind Cloudflare keep
-> it `false`: the 100-second origin limit would return 524 while the work continues.
+> With `poll_interval_seconds > 0` the call blocks until post-processing finishes. Behind Cloudflare keep
+> it `0`: the 100-second origin limit would return 524 while the work continues.
 
 ---
 
@@ -466,7 +466,7 @@ into the file:
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "wait": false, "wait_until": "enabled", "timeout_seconds": 90,
+  "publish":  { "wait_until": "enabled", "timeout_seconds": 90,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",

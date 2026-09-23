@@ -233,7 +233,7 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 }
 ```
 
-> `publish.wait=true` 时调用会被同步阻塞到后处理结束——经 Cloudflare 访问请保持 `false`
+> `poll_interval_seconds > 0` 时调用会被同步阻塞到后处理结束——经 Cloudflare 访问请设为 `0`
 
 ---
 
@@ -426,7 +426,7 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "wait": false, "wait_until": "enabled", "timeout_seconds": 90,
+  "publish":  { "wait_until": "enabled", "timeout_seconds": 90,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
