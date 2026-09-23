@@ -1,12 +1,14 @@
 services:
   weknora-forge:
+    # build: . 保留用于本地/CI 构建；纯拉取部署请用 `docker compose pull && docker compose up -d --no-build`
     build: .
     image: bruce1977/weknora-forge:latest
+    pull_policy: always
     ports:
       - "8000:8000"
     volumes:
-      # Read-only mount of the Forge config (FORGE_CONFIG=/data/config.json in the image).
-      # Place your production config.json on the host at /data/config.json.
+      # Read-only mount of the Forge config *directory* (FORGE_CONFIG=/data in the image).
+      # Place your production config.json on the host so it appears at /data/config.json.
       - /data:/data:ro
     env_file:
       - .env

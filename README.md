@@ -88,7 +88,7 @@ Returns service information including upstream address, v1/v2 prefixes, and auth
 ```JSON
 {
   "service": "weknora-forge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "upstream": "http://localhost:8080",
   "v1_prefix": "/api/v1",
   "v2_prefix": "/api/v2",

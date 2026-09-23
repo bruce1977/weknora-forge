@@ -3,9 +3,10 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    FORGE_CONFIG=/data/config.json
+    FORGE_CONFIG=/data \
+    PYTHONPATH=/
 
-WORKDIR /srv
+WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install -r requirements.txt && rm requirements.txt \
@@ -13,14 +14,20 @@ RUN pip install -r requirements.txt && rm requirements.txt \
 
 USER forge
 
-# Copy the app as a proper package so relative imports (from . / from ..) keep working.
-# `app.main:app` is the entrypoint (matches local dev: `python -m uvicorn app.main:app`).
-COPY --chown=forge:forge app /srv/app
-COPY --chown=forge:forge scripts /srv/scripts
+# The application package IS /app: app/__init__.py, app/main.py, ... land directly
+# under /app. Because the code uses package-relative imports (`from .` / `from ..`),
+# `app` must be imported as a package, so its PARENT (/, via PYTHONPATH=/) is on the
+# path and `uvicorn app.main:app` resolves to /app. Startup runs from WORKDIR /app.
+COPY --chown=forge:forge app /app
 
-# Ship the default config template (overridden at runtime by the mounted /data volume
-# or by FORGE_CONFIG). Not mounted => app falls back to built-in defaults.
-COPY --chown=forge:forge data /srv/data
+# Auxiliary helper scripts (HMAC signing, sample requests, config viewer).
+# Standalone tools, NOT imported by the app at runtime.
+COPY --chown=forge:forge scripts /opt/scripts
+
+# Default config baked into the /data volume so the image runs standalone.
+# At deployment, mount the host config directory over /data and config.json inside
+# it is used (FORGE_CONFIG=/data points at the config *directory*).
+COPY --chown=forge:forge data /data
 
 VOLUME ["/data"]
 EXPOSE 8000

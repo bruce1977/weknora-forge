@@ -1,8 +1,10 @@
 """Configuration loading for WeKnora Forge.
 
 Forge is configured by ONE JSON file: ``data/config.json`` (production) or
-``config.json`` (legacy fallback).  Override the path with the ``FORGE_CONFIG``
-environment variable.
+``config.json`` (legacy fallback).  Override the config *directory* (or, for
+backwards compatibility, an explicit config *file*) with the ``FORGE_CONFIG``
+environment variable.  When ``FORGE_CONFIG`` points at a directory, the
+standard ``config.json`` inside it is used.
 
 Secrets never need to be written into that file: every ``${VAR}`` placeholder found in
 the file is expanded from the process environment at load time, with the optional
@@ -50,7 +52,13 @@ def _expand_env(value: Any) -> Any:
 def default_config_path() -> Path:
     override = os.environ.get(CONFIG_PATH_ENV, "").strip()
     if override:
-        return Path(override)
+        # FORGE_CONFIG is a config *directory* (preferred) or, for backwards
+        # compatibility, an explicit config *file*. A directory resolves to the
+        # standard config.json inside it.
+        p = Path(override)
+        if p.is_dir():
+            return p / DEFAULT_CONFIG_FILENAME
+        return p
     repo_root = Path(__file__).resolve().parent.parent
     # Prefer data/config.json (production), fall back to config.json (legacy)
     data_path = repo_root / DATA_CONFIG_FILENAME
