@@ -6,6 +6,8 @@ Metadata model (all numeric):
   - novel:   string,  e.g. "风雪江湖"
 
 Run with:  pytest tests/test_novel_search.py -m live
+The paired api_secret must be registered for FORGE_API_KEY via
+WEKNORA_API_KEY/WEKNORA_API_SECRET or data/keys.json (app/keystore.py).
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ if not os.environ.get("FORGE_API_KEY") or not os.environ.get("FORGE_KB_ID"):
     )
 
 from app.config import get_config, load_config  # noqa: E402
+from app.keystore import keystore  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 API_KEY = os.environ["FORGE_API_KEY"]
@@ -45,8 +48,14 @@ _TS = int(time.time())
 
 
 def _sign(method: str, path: str, key: str = API_KEY) -> str:
+    secret = keystore.get_secret(key)
+    if not secret:
+        raise RuntimeError(
+            f"no api_secret registered for {key!r}: set WEKNORA_API_KEY/"
+            "WEKNORA_API_SECRET or add the pair to data/keys.json"
+        )
     return hmac.new(
-        key.encode(), f"{method}{path}".encode(), hashlib.sha256
+        secret.encode(), f"{method}{path}".encode(), hashlib.sha256
     ).hexdigest()
 
 
@@ -235,11 +244,18 @@ def app():
     os.environ["FORGE_CONFIG"] = _REAL_CONFIG
     load_config.cache_clear()
     get_config()
+    keystore.reset()
+    if not keystore.get_secret(API_KEY):
+        pytest.skip(
+            "Skipping live tests: no api_secret registered for FORGE_API_KEY "
+            "(set WEKNORA_API_SECRET or data/keys.json)"
+        )
     application = create_app()
     yield application
     os.environ["FORGE_CONFIG"] = mock_config_path
     load_config.cache_clear()
     get_config()
+    keystore.reset()
 
 
 @pytest.fixture(scope="module", autouse=True)

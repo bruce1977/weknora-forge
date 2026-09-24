@@ -121,7 +121,10 @@ def create_app() -> FastAPI:
             "in": "header",
             "required": True,
             "schema": {"type": "string", "example": "YOUR_WEKNORA_API_KEY"},
-            "description": "Your WeKnora API key - it is also the HMAC signing key.",
+            "description": (
+                "Your WeKnora API key (identity). The HMAC is keyed by the api_secret "
+                "paired with it (env WEKNORA_API_SECRET or data/keys.json)."
+            ),
         },
         {
             "name": "X-Forge-Signature",
@@ -129,12 +132,14 @@ def create_app() -> FastAPI:
             "required": True,
             "schema": {
                 "type": "string",
-                "example": "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH))",
+                "example": "hex(HMAC_SHA256(api_secret, METHOD + FULL_PATH))",
             },
             "description": (
-                "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH)). Generate it with "
-                "scripts/gen_forge_signature.py or scripts/hmac_request.py. "
-                "NOTE: POST/PUT/PATCH/DELETE signatures are single-use."
+                "hex(HMAC_SHA256(api_secret, METHOD + FULL_PATH)), where api_secret is "
+                "the secret paired with X-API-Key (env WEKNORA_API_SECRET or "
+                "data/keys.json). Generate it with scripts/gen_forge_signature.py or "
+                "scripts/hmac_request.py. NOTE: POST/PUT/PATCH/DELETE signatures are "
+                "single-use."
             ),
         },
     ]
@@ -157,14 +162,18 @@ def create_app() -> FastAPI:
                 "type": "apiKey",
                 "in": "header",
                 "name": "X-API-Key",
-                "description": "Your WeKnora API key - it is also the HMAC signing key.",
+                "description": (
+                    "Your WeKnora API key (identity). The HMAC is keyed by the "
+                    "api_secret paired with it (env WEKNORA_API_SECRET or "
+                    "data/keys.json)."
+                ),
             },
             "X-Forge-Signature": {
                 "type": "apiKey",
                 "in": "header",
                 "name": "X-Forge-Signature",
                 "description": (
-                    "hex(HMAC_SHA256(api_key, METHOD + FULL_PATH)). Generate it with "
+                    "hex(HMAC_SHA256(api_secret, METHOD + FULL_PATH)). Generate it with "
                     "scripts/gen_forge_signature.py or scripts/hmac_request.py."
                 ),
             },

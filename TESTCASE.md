@@ -13,8 +13,13 @@
 ## 0. 通用约定
 
 - **鉴权（v2 接口）**：所有 v2 业务接口均经过 `verify_v2` 依赖，要求
-  HMAC 二次签名 `X-Forge-Signature = hex(HMAC_SHA256(api_key, METHOD + FULL_PATH))`
-  并通过上游校验 API Key。`tests/conftest.py::auth_headers` 生成合规请求头。
+  HMAC 二次签名 `X-Forge-Signature = hex(HMAC_SHA256(api_secret, METHOD + FULL_PATH))`，
+  `api_secret` 由 keystore（`app/keystore.py`）按 `X-API-Key` 查表得到（环境变量 +
+  `keys.json` 合并缓存），并通过上游校验 API Key。`tests/conftest.py::auth_headers`
+  生成合规请求头。
+- **测试凭证**：`tests/conftest.py` 从环境变量 `WEKNORA_API_KEY` / `WEKNORA_API_SECRET`
+  读取测试用 API Key/Secret（缺省回退仓库 `.env`，再缺省用内置默认值），并写回环境变量
+  供 keystore 注册；live 测试的 key 来自 `FORGE_API_KEY`，secret 经 keystore 查表。
 - **测试夹具**：`tests/conftest.py` 写入临时 `config.json` 并设 `FORGE_CONFIG`，
   `client` fixture 提供已启动 lifespan 的 `TestClient`；`build_app` fixture 额外注入
   `FakeDatabase` 以绕过真实 PostgreSQL。
@@ -194,7 +199,7 @@
 - **步骤**：直接构造 `SearchRequest(query="level = 3", kb_ids=["kb-x"])` 调用
   `MetasSearchService.search(...)`。
 - **预期**：最终主 SQL 绑定参数 `main_params["forge_kb_id_0"] == "kb-x"`，
-  且生成等值条件（支持同时在多个知识库检索）。
+  且生成 `IN` 过滤（支持同时在多个知识库检索）。
 - **断言要点**：
   ```python
   assert executor.main_params["forge_kb_id_0"] == "kb-x"
@@ -231,7 +236,7 @@ python -m pytest tests -q
 ```
 
 四项增强均带有 mock（respx + FakeExecutor），**不触碰真实 WeKnora / PostgreSQL**。
-预期：97 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`）。
+预期：111 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`，并配置 `FORGE_API_KEY` / `FORGE_KB_ID`）。
 
 ---
 
@@ -289,15 +294,20 @@ python -m pytest tests -q
 
 ```
 payload   = METHOD + FULL_PATH          # 例如 "POST/api/v2/publish?kb_id=kb-1"
-signature = hex(HMAC_SHA256(api_key, payload))
+signature = hex(HMAC_SHA256(api_secret, payload))
 ```
 
 **用法**：
 ```bash
 python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
-    --api-key <WEKNORA_API_KEY> [--query "kb_id=kb-1"] [--curl] [--json '{...}']
+    --api-key <WEKNORA_API_KEY> [--api-secret <WEKNORA_API_SECRET>] \
+    [--keys-file data/keys.json] [--query "kb_id=kb-1"] [--curl] [--json '{...}']
 ```
 输出 `X-API-Key` / `X-Forge-Signature` 及可选的可直接执行的 `curl` 命令。
+`--api-key` 缺省取 `$WEKNORA_API_KEY`（环境变量未导出时回退仓库 `.env`）；
+`--api-secret` 缺省时依次回退 `$WEKNORA_API_SECRET` / `.env`、
+`keys.json` 中对应 `api_key` 的条目；`scripts/hmac_request.py`
+参数相同。
 
 **重要**：POST/PUT/PATCH/DELETE 的签名是**一次性**的（重放会被拒），Swagger 测写接口每次都要重新生成；GET 可复用。
 
@@ -360,7 +370,55 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 
 ---
 
+## 11. 签名密钥缓存 keystore（`app/keystore.py`）
+
+**相关实现**：`app/keystore.py` 将环境变量（`WEKNORA_API_KEY` / `WEKNORA_API_SECRET`，
+本地环境测试）与 `config.json` 同目录的 `keys.json`（实际生成环境部署，可配多组）
+合并为进程内字典缓存 `api_key -> api_secret`；以（环境变量值 + keys.json 路径 +
+文件 mtime/size）为指纹，环境或文件变化时自动刷新。`keys.json` 中与
+`WEKNORA_API_KEY` 相同的 `api_key` 会覆盖环境变量的 `api_secret`。
+`app/security.py::verify_hmac_signature` 使用
+`hex(HMAC_SHA256(api_secret, payload))` 校验，未注册的 `api_key` 返回
+401 `INVALID_SIGNATURE`；`reset_caches()` 会清空该缓存。
+
+### TC-11.1 基础密钥对来自环境变量
+- **测试函数**：`tests/test_keystore.py::test_base_pair_is_loaded_from_env`、
+  `test_env_pair_is_loaded`、`test_env_pair_verifies_end_to_end`
+- **预期**：`WEKNORA_API_KEY`/`WEKNORA_API_SECRET` 注册的密钥对可通过签名校验
+  （HTTP 200），未注册 key 返回 None / 401。
+
+### TC-11.2 keys.json 条目可用且与环境变量合并
+- **测试函数**：`tests/test_keystore.py::test_keys_json_entry_merges_with_env`、
+  `test_keys_json_pair_verifies_end_to_end`、`test_keys_json_entries_must_be_objects`
+- **预期**：文件条目与环境对同时存在；文件条目签名通过、错误 secret → 401；
+  非法条目（非对象 / 空字段）被跳过，不影响其它条目。
+
+### TC-11.3 keys.json 覆盖环境变量 secret
+- **测试函数**：`tests/test_keystore.py::test_keys_json_overrides_env_secret`
+- **预期**：同 `api_key` 时 `get_secret` 返回 `keys.json` 中的 `api_secret`。
+
+### TC-11.4 keys.json / 环境变量修改后缓存自动刷新（密钥轮换）
+- **测试函数**：`tests/test_keystore.py::test_secret_rotation_applies_without_restart`、
+  `test_env_change_refreshes_cache`
+- **预期**：轮换后**无需重启**：旧 secret 签名 → 401，新 secret 签名 → 200。
+
+### TC-11.5 未注册 api_key 与旧算法（api_key 自签名）→ 401
+- **测试函数**：`tests/test_keystore.py::test_unregistered_api_key_is_rejected`、
+  `tests/test_keystore.py::test_signature_keyed_by_api_key_is_rejected`、
+  `tests/test_auth.py::test_v2_rejects_signature_keyed_by_api_key`
+- **预期**：均返回 401 `INVALID_SIGNATURE`（`hex(HMAC_SHA256(api_key, ...))` 不再通过）。
+
+### TC-11.6 损坏的 keys.json 回退环境变量
+- **测试函数**：`tests/test_keystore.py::test_malformed_keys_json_falls_back_to_env`
+- **预期**：文件无法解析时仅忽略文件条目（记 warning），环境变量密钥对仍可用，
+  服务不崩溃。
+
+---
+
 > **文档更新**：README.md / README_CN.md 已同步 `tag_names`（替代 `tag`）、
 > `tag_ids`（替代 `tag_id`）、开放 health、probe 双重连通性检查、
-> 移除 proxy 配置、移除 keystore、purge 响应去掉 `sample`、
-> search 返回完整 `metas`、`publish.timeout_seconds` 默认 300 等变更。
+> 移除 proxy 配置、purge 响应去掉 `sample`、
+> search 返回完整 `metas`、`publish.timeout_seconds` 默认 300 等变更；
+> 本轮同步 `X-Forge-Signature` 改用 `api_secret`（`WEKNORA_API_KEY/SECRET` 环境变量 +
+> `data/keys.json` 多组密钥 + `app/keystore.py` 自动刷新缓存），新增
+> `tests/test_keystore.py` 与 `example.env` 密钥对模板。

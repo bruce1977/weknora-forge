@@ -124,7 +124,8 @@ class AuthConfig(BaseModel):
     """Second-factor verification + WeKnora API key validation."""
 
     # off  = no verification (trusted network only)
-    # hmac = HMAC-SHA256 signature over METHOD + FULL_PATH, keyed by the caller's API key
+    # hmac = HMAC-SHA256 signature over METHOD + FULL_PATH, keyed by the api_secret
+    #        paired with the caller's API key (see app/keystore.py)
     mode: Literal["off", "hmac"] = "hmac"
     require_on_v1: bool = True
     require_on_v2: bool = True

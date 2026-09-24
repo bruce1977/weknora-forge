@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app.deps import get_db
 from app.main import create_app
 from app.services.db import FakeExecutor
-from tests.conftest import UPSTREAM, VALIDATE_URL, auth_headers
+from tests.conftest import API_KEY, UPSTREAM, VALIDATE_URL, auth_headers
 
 
 class FakeDatabase:
@@ -332,7 +332,7 @@ def test_endpoints_require_second_factor(path, build_app):
     )
 
     method = "DELETE" if "purge" in path else "POST"
-    resp = client.request(method, path, headers={"X-API-Key": "sk-test-key"})
+    resp = client.request(method, path, headers={"X-API-Key": API_KEY})
     assert resp.status_code == 401
     app.dependency_overrides.clear()
 

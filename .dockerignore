@@ -9,6 +9,8 @@ tests/
 var/
 .tmp-docs/
 .env
+.debug
+data/keys.json
 *.db
 *.sqlite3
 .pytest_cache/

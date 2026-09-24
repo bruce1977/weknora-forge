@@ -7,6 +7,8 @@ Requires environment variables:
   FORGE_API_KEY     - WeKnora API key
   FORGE_KB_ID       - knowledge base id to seed/search
   DB_HOST / DB_PASSWORD (or FORGE_CONFIG pointing to data/config.json)
+The paired api_secret must be registered for FORGE_API_KEY via
+WEKNORA_API_KEY/WEKNORA_API_SECRET or data/keys.json (app/keystore.py).
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ if not os.environ.get("FORGE_API_KEY") or not os.environ.get("FORGE_KB_ID"):
     )
 
 from app.config import get_config, load_config  # noqa: E402
+from app.keystore import keystore  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 API_KEY = os.environ["FORGE_API_KEY"]
@@ -46,8 +49,14 @@ _REAL_CONFIG = str(Path(__file__).resolve().parent.parent / "data" / "config.jso
 
 
 def _sign(method: str, path: str, key: str = API_KEY) -> str:
+    secret = keystore.get_secret(key)
+    if not secret:
+        raise RuntimeError(
+            f"no api_secret registered for {key!r}: set WEKNORA_API_KEY/"
+            "WEKNORA_API_SECRET or add the pair to data/keys.json"
+        )
     return hmac.new(
-        key.encode(), f"{method}{path}".encode(), hashlib.sha256
+        secret.encode(), f"{method}{path}".encode(), hashlib.sha256
     ).hexdigest()
 
 
@@ -108,12 +117,19 @@ def app():
     os.environ["FORGE_CONFIG"] = _REAL_CONFIG
     load_config.cache_clear()
     get_config()  # caches under None with the real config
+    keystore.reset()
+    if not keystore.get_secret(API_KEY):
+        pytest.skip(
+            "Skipping live tests: no api_secret registered for FORGE_API_KEY "
+            "(set WEKNORA_API_SECRET or data/keys.json)"
+        )
     application = create_app()
     yield application
     # Restore: put the mock config back into the cache so unit tests are unaffected
     os.environ["FORGE_CONFIG"] = mock_config_path
     load_config.cache_clear()
-    get_config()  # re-caches under None with the mock config
+    get_config()
+    keystore.reset()
 
 
 _TS = int(time.time())

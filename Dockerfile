@@ -20,9 +20,9 @@ USER forge
 # path and `uvicorn app.main:app` resolves to /app. Startup runs from WORKDIR /app.
 COPY --chown=forge:forge app /app
 
-# Auxiliary helper scripts (HMAC signing, sample requests, config viewer).
-# Standalone tools, NOT imported by the app at runtime.
-COPY --chown=forge:forge scripts /opt/scripts
+# scripts/ stays out of the image on purpose: the app never imports it and the
+# helpers (gen_forge_signature / hmac_request / show_config) are run from the
+# repository on the host, not inside the container.
 
 # Default config baked into the /data volume so the image runs standalone.
 # At deployment, mount the host config directory over /data and config.json inside

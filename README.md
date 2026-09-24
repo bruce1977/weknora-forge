@@ -16,7 +16,7 @@ What the native API lacks, and how Forge covers it:
 
 | Gap | How it is filled | Endpoint |
 | --- | --- | --- |
-| No second credential beyond the API key | HMAC-SHA256 signature header, keyed by the API key itself | every v1 / v2 route |
+| No second credential beyond the API key | HMAC-SHA256 signature header keyed by a dedicated `api_secret` paired with the API key | every v1 / v2 route |
 | Manual knowledge needs multi-step choreography (draft → metadata → publish) | one server-side call, rolled back on failure | `POST /api/v2/publish` |
 | Only title/tag/time filtering, no `custom_metadata` search | FMQ query language pushed down to PostgreSQL JSONB | `POST /api/v2/knowledge/search` |
 | Soft delete only (writes `deleted_at`), no physical purge | ordered cascade delete + orphan vector sweep | `DELETE /api/v2/management/purge` |
@@ -28,7 +28,7 @@ What the native API lacks, and how Forge covers it:
 ### Docker Compose
 
 ```bash
-cp example.env .env            # at minimum WEKNORA_BASE_URL and the DB_* values
+cp example.env .env            # WEKNORA_BASE_URL, DB_* and the WEKNORA_API_KEY/SECRET pair
 docker compose up -d --build
 curl http://localhost:8000/                        # service info
 curl http://localhost:8000/api/v2/health           # open endpoint, no auth required
@@ -46,10 +46,10 @@ python scripts/show_config.py                       # effective config, secrets 
 
 > `--no-proxy-headers` is required: forwarding headers are handled once, in `app/proxy.py`.
 > Uvicorn's own handling only trusts 127.0.0.1, so it would silently ignore `X-Forwarded-*`
-> coming from a container or tunnel (see chapter 2).
+> coming from a container or tunnel (see chapter 3).
 
-Tests: `python -m pytest tests -q` (**97 passed, 2 skipped** — live tests need `WEKNORA_BASE_URL`;
-the rest are mocked with respx, no real WeKnora or database required).
+Tests: `python -m pytest tests -q` (**111 passed, 2 skipped** — live tests need `WEKNORA_BASE_URL`
+and `FORGE_API_KEY`/`FORGE_KB_ID`; the rest are mocked with respx, no real WeKnora or database required).
 
 ---
 
@@ -63,6 +63,7 @@ the rest are mocked with respx, no real WeKnora or database required).
 | `GET` | `/` | ✗ | Service info |
 | **v1 Passthrough** | | | |
 | `ANY` | `/api/v1/{path}` | HMAC | Forward to WeKnora |
+| `ANY` | `/v1/{path}` | HMAC | Alias of `/api/v1/{path}` |
 | **v2 System** | | | |
 | `GET` | `/api/v2/health` | ✗ | Open health check (returns `{}`) |
 | `GET` | `/api/v2/probe` | HMAC | WeKnora + PostgreSQL connectivity probe |
@@ -183,6 +184,7 @@ Requires HMAC auth. Tests both WeKnora and PostgreSQL connectivity.
 **Generate HMAC signature:**
 
 ```bash
+# the secret comes from --api-secret, else $WEKNORA_API_SECRET (.env), else keys.json
 python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
     --api-key sk-xxxxx --curl
 ```
@@ -243,8 +245,9 @@ Executes the full publish orchestration: resolve tag names → create/get tags �
 }
 ```
 
-> With `poll_interval_seconds > 0` the call blocks until post-processing finishes. Behind Cloudflare keep
-> it `0`: the 100-second origin limit would return 524 while the work continues.
+> With `poll_interval_seconds > 0` the call blocks until post-processing finishes and the response
+> then also carries `parse_status` / `enable_status`. Behind Cloudflare keep it `0`: the 100-second
+> origin limit would return 524 while the work continues.
 
 ---
 
@@ -379,22 +382,43 @@ curl http://localhost:8000/api/v2/health           # open, no auth required
 | Layer | Credential | Verification |
 | --- | --- | --- |
 | 1 | WeKnora `X-API-Key` | **v2 only**: validated against `GET {upstream}/api/v1/knowledge-bases`, cached per key (300 s positive / 30 s negative). `401` means "key rejected", `5xx` means "WeKnora unreachable" (HTTP 502) - the two stay distinguishable. **v1 skips this** and stays a transparent pipe, letting WeKnora return its own status code |
-| 2 (second factor) | `X-Forge-Signature` | HMAC-SHA256 keyed by the caller's own API key |
+| 2 (second factor) | `X-Forge-Signature` | HMAC-SHA256 keyed by the `api_secret` paired with the caller's API key (see 4.1) |
 
 ### 4.1 Signature scheme
 
 ```
 payload   = HTTP_METHOD + HTTP_FULL_PATH        # e.g. "POST/api/v2/publish?dry_run=1"
-signature = hex(HMAC_SHA256(api_key, payload))  # -> X-Forge-Signature
+signature = hex(HMAC_SHA256(api_secret, payload))  # -> X-Forge-Signature
 ```
 
-- No timestamp, no nonce, no body digest: **the API key is the signing key**, so no extra shared
-  secret has to be distributed.
+- `api_secret` never travels with the request: Forge looks it up in an in-process
+  keystore (`app/keystore.py`) by the `X-API-Key` value. The dictionary cache is merged from
+  1. the environment - `WEKNORA_API_KEY` + `WEKNORA_API_SECRET` (local testing), and
+  2. `keys.json` next to `config.json` - `data/keys.json` locally, `/data/keys.json` in
+     the container (deployments, one entry per pair):
+
+     ```json
+     [
+       { "api_key": "sk-aaaa", "api_secret": "..." },
+       { "api_key": "sk-bbbb", "api_secret": "..." }
+     ]
+     ```
+
+  A `keys.json` entry whose `api_key` equals `WEKNORA_API_KEY` overrides the environment
+  secret. The file is re-read automatically whenever it changes, so secrets can be rotated
+  **without a restart**.
+- The API key itself is never the signing key any more: possessing the key alone no longer
+  lets anyone forge signatures. An `api_key` without a registered `api_secret` is rejected
+  with `401 INVALID_SIGNATURE`.
+- No timestamp, no nonce and no body digest: the signed payload is exactly
+  `METHOD + FULL_PATH`, and state-changing methods (POST/PUT/PATCH/DELETE) use a fresh
+  signature per request.
 - `HTTP_FULL_PATH` is the raw path plus the raw query string. Forge signs the ASGI `raw_path`
   and performs **no normalisation and no decoding**: percent-encoding is part of the signature.
-- Headers: `X-API-Key` (also the signing key) and `X-Forge-Signature` (the HMAC).
+- Headers: `X-API-Key` (identity) and `X-Forge-Signature` (the HMAC).
 
 ```bash
+# the secret comes from --api-secret, else $WEKNORA_API_SECRET (.env), else keys.json
 python scripts/hmac_request.py --base http://localhost:8000 --api-key sk-xxxxx \
     GET /api/v2/probe
 
@@ -432,11 +456,14 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 |-----------|----------|-------------|
 | `--method` | Yes | HTTP method (GET, POST, PUT, PATCH, DELETE) |
 | `--path` | Yes | Request path starting with `/` (include query string or use `--query`) |
-| `--api-key` | Yes | Your WeKnora API key (also used as the HMAC signing key) |
+| `--api-key` | Yes* | WeKnora API key sent as `X-API-Key` (defaults to `$WEKNORA_API_KEY`, else the repo `.env`) |
+| `--api-secret` | No | HMAC signing secret; falls back to `$WEKNORA_API_SECRET` / `.env`, then to the `keys.json` entry for the key |
+| `--keys-file` | No | Explicit `keys.json` path (default: next to `config.json`, then `data/keys.json`) |
 | `--query` | No | Raw query string without the leading `?` |
 | `--json` | No | JSON body string, or `@file` to read from a file (only printed with `--curl`) |
 | `--curl` | No | Output a complete curl command with signed headers |
 
+> \* Required when `$WEKNORA_API_KEY` is not set.
 > **Note:** For state-changing methods (POST/PUT/PATCH/DELETE), generate a fresh signature for each request. GET signatures may be reused.
 
 ---
@@ -466,13 +493,27 @@ into the file:
                     "result_column": ["id", "title", "file_name", "kb_name", "tag_name"],
                     "max_rows": 5000, "default_page_size": 20, "extra_where": "" },
   "purge":    { "dry_run": true, "default_retention_days": 30, "include_embed": false, "max_rows": 200000,
-                "tables": [ /* see chapter 7 */ ], "orphan_tables": [ /* ... */ ] }
+                "tables": [ /* full list: data/config.json */ ], "orphan_tables": [ /* ... */ ] }
 }
 ```
 
 Notes:
 
 - `auth.mode`: `hmac` or `off` (use `off` only on a fully trusted internal network).
+- **Signature secrets** are deliberately not part of `config.json` (chapter 4): local testing
+  uses the `WEKNORA_API_KEY` / `WEKNORA_API_SECRET` environment variables, deployments put one
+  or more pairs into `keys.json` **next to** `config.json` (`data/keys.json`, i.e.
+  `/data/keys.json` in the container):
+
+  ```json
+  [
+    { "api_key": "sk-aaaa...", "api_secret": "..." },
+    { "api_key": "sk-bbbb...", "api_secret": "..." }
+  ]
+  ```
+
+  A `keys.json` entry overrides `WEKNORA_API_SECRET` when the `api_key` matches, and edits to
+  the file are picked up automatically (secrets rotate without a restart).
 - `swagger.enabled`: controls the Swagger UI and OpenAPI spec. Set `SWAGGER_ENABLED=false`
   (or `0` / `no` / `off`) to fully disable `GET /docs` and `GET /openapi.json` - useful in
   production. Defaults to `true`. The UI is vendored locally (`app/static/swagger`, from
@@ -507,6 +548,7 @@ app/
 ├── proxy.py               # reverse-proxy awareness: scheme / client IP / forwarded headers (hardcoded)
 ├── config.py              # config.json loading + ${ENV} expansion (auto-detects data/config.json)
 ├── security.py            # second factor (HMAC over METHOD + FULL_PATH)
+├── keystore.py            # api_key -> api_secret cache (env + keys.json, auto-refresh)
 ├── upstream.py            # WeKnora client (passthrough, semantic calls, API key cache)
 ├── schemas.py             # request/response models (publish, metas search)
 ├── logging.py             # log setup
@@ -519,10 +561,10 @@ app/
     ├── publish_service.py # publish orchestration (tags -> draft -> metas -> publish -> optional wait)
     └── purge_service.py   # physical purge (cascade delete + orphan sweep)
 scripts/                   # gen_forge_signature.py / hmac_request.py / show_config.py
-tests/                     # 97 tests (2 live skipped), respx mocked upstream
+tests/                     # 111 tests (2 live skipped), respx mocked upstream
 FMQ.md                     # FMQ query language full reference
 pyproject.toml             # pytest config (asyncio_mode, testpaths)
-data/                      # runtime data (config.json, etc.)
+data/                      # runtime data (config.json, keys.json, ...)
 ```
 
 ---

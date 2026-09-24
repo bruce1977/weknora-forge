@@ -1,7 +1,9 @@
 """Authentication tests: HMAC second factor + WeKnora API key validation.
 
 Covered behaviours:
-  * signature = HMAC-SHA256(api_key, METHOD + FULL_PATH)
+  * signature = HMAC-SHA256(api_secret, METHOD + FULL_PATH) with api_secret looked
+    up in the keystore (env pair + keys.json) by the X-API-Key value
+  * the legacy scheme (api_key as its own signing key) no longer verifies
   * v1 passthrough verifies the second factor but never calls back into WeKnora
   * v2 verifies the second factor FIRST, then validates the key upstream (cached)
   * "key rejected" (401) stays distinguishable from "WeKnora unreachable" (502)
@@ -12,7 +14,14 @@ from __future__ import annotations
 import httpx
 import respx
 
-from tests.conftest import API_KEY, VALIDATE_URL, UPSTREAM, auth_headers, sign, write_config
+from tests.conftest import (
+    API_KEY,
+    UPSTREAM,
+    VALIDATE_URL,
+    auth_headers,
+    sign,
+    write_config,
+)
 
 TEST_ENDPOINT = "/api/v2/probe"
 PROBE_URL = f"{UPSTREAM}/knowledge-bases"
@@ -36,6 +45,15 @@ def test_v2_rejects_wrong_path_signature(client):
     with respx.mock(assert_all_called=False) as router:
         router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
         resp = client.get(f"{TEST_ENDPOINT}?page=2", headers=headers)
+        assert _error(resp)[:2] == (401, "INVALID_SIGNATURE")
+
+
+def test_v2_rejects_signature_keyed_by_api_key(client):
+    """The legacy scheme (api_key signs itself) must no longer verify."""
+    headers = auth_headers("GET", TEST_ENDPOINT, api_secret=API_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(return_value=httpx.Response(200, json={"success": True, "data": []}))
+        resp = client.get(TEST_ENDPOINT, headers=headers)
         assert _error(resp)[:2] == (401, "INVALID_SIGNATURE")
 
 

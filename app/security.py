@@ -9,10 +9,14 @@ There is no timestamp, no nonce and no body digest - the signed payload is exact
 
     payload = HTTP_METHOD + HTTP_FULL_PATH          (e.g. "POST/api/v2/publish?dry_run=1")
 
-    X-Forge-Signature = hex(HMAC_SHA256(secret, payload))
+    X-Forge-Signature = hex(HMAC_SHA256(api_secret, payload))
 
-``secret`` is the caller's own WeKnora API key, so no extra shared secret has to be
-distributed: whoever owns the key can sign, and nobody else can.
+``api_secret`` is looked up in the keystore (``app/keystore.py``) by the caller's
+WeKnora API key: the secret comes from the ``WEKNORA_API_KEY`` / ``WEKNORA_API_SECRET``
+environment pair (local testing) merged with ``keys.json`` (deployments; a file entry
+overrides the environment secret for the same api_key). The API key itself is never
+the signing key, so possessing it alone does not let anyone forge signatures. An
+api_key without a configured api_secret is rejected.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from fastapi import Request
 
 from .config import AuthConfig, UpstreamConfig
 from .errors import invalid_signature, unauthorized
+from .keystore import keystore
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -81,12 +86,14 @@ def signature_payload(method: str, path_with_query: str) -> str:
 
 
 def compute_signature(secret: str, payload: str) -> str:
-    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.new(
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
 
 
 def reset_caches() -> None:
-    """Drop in-process caches (tests / config reload).  No-op kept for API compat."""
-    pass
+    """Drop in-process caches (tests / config reload)."""
+    keystore.reset()
 
 
 def extract_upstream_api_key(request: Request) -> str:
@@ -119,17 +126,38 @@ def verify_hmac_signature(
     if not api_key:
         raise unauthorized("Missing WeKnora API key: provide X-API-Key")
 
-    expected = compute_signature(api_key, signature_payload(request.method, full_path(request)))
+    secret = keystore.get_secret(api_key)
+    if not secret:
+        raise invalid_signature(
+            "API key has no configured api_secret "
+            "(see WEKNORA_API_KEY/WEKNORA_API_SECRET or keys.json)"
+        )
+
+    expected = compute_signature(
+        secret, signature_payload(request.method, full_path(request))
+    )
     if not hmac.compare_digest(expected, signature):
         raise invalid_signature("Signature does not match METHOD + FULL_PATH")
 
     return _client_label(request, auth, api_key)
 
 
-async def authenticate(request: Request, auth: AuthConfig, upstream: UpstreamConfig) -> Tuple[Principal, str]:
+async def authenticate(
+    request: Request, auth: AuthConfig, upstream: UpstreamConfig
+) -> Tuple[Principal, str]:
     """Run second-factor verification only (layer 2). Returns (principal, api_key)."""
     api_key = extract_upstream_api_key(request)
     if auth.mode == "off":
-        return Principal(client_id="anonymous", method="anonymous", api_key_present=bool(api_key), api_key_ref=mask_secret(api_key)), api_key
+        return Principal(
+            client_id="anonymous",
+            method="anonymous",
+            api_key_present=bool(api_key),
+            api_key_ref=mask_secret(api_key),
+        ), api_key
     label = verify_hmac_signature(request, auth, api_key)
-    return Principal(client_id=label, method="hmac", api_key_present=True, api_key_ref=mask_secret(api_key)), api_key
+    return Principal(
+        client_id=label,
+        method="hmac",
+        api_key_present=True,
+        api_key_ref=mask_secret(api_key),
+    ), api_key
