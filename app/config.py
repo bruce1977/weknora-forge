@@ -135,14 +135,33 @@ class AuthConfig(BaseModel):
 
 
 class PublishConfig(BaseModel):
-    """Server-side behaviour of POST /api/v2/publish."""
+    """Server-side behaviour of POST /api/v2/publish.
 
+    ``allow_sync`` gates the reserved per-request sync wait (default off so
+    long-held connections cannot pile up and starve the service). When it is
+    enabled, wait_until / timeout_seconds / poll_interval_seconds apply only
+    to requests with ``sync=true``; the default ``sync=false`` returns as soon
+    as the article has been published.
+    """
+
+    allow_sync: bool = False
     wait_until: Literal["enabled", "completed", "terminal"] = "enabled"
     timeout_seconds: int = 300
     poll_interval_seconds: float = 3.0
     default_channel: str = "api"
     merge_metas: bool = True
     rollback_on_failure: bool = True
+
+    @field_validator("allow_sync", mode="before")
+    @classmethod
+    def _coerce_allow_sync(cls, v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+        if isinstance(v, int):
+            return bool(v)
+        return bool(v)
 
 
 class DatabaseConfig(BaseModel):

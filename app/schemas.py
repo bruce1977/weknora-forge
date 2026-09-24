@@ -15,8 +15,11 @@ from pydantic import BaseModel, Field
 class PublishRequest(BaseModel):
     """Publish one article: draft -> custom metas -> publish.
 
-    wait / timeout / polling behaviour is not part of the request any more, it is
-    configured per deployment in config.json (section ``publish``).
+    By default the call returns as soon as the article is published (async).
+    ``sync=true`` is a reserved wait mode: it is rejected (400 SYNC_DISABLED)
+    unless ``publish.allow_sync=true``; when enabled it blocks until
+    post-processing finishes (wait target, timeout and interval come from
+    config.json section ``publish``).
     """
 
     kb_id: str = Field(..., description="Knowledge base ID")
@@ -26,8 +29,8 @@ class PublishRequest(BaseModel):
     content: str = Field(
         ...,
         min_length=1,
-        max_length=10000,
-        description="Markdown body (max 10000 chars)",
+        max_length=20000,
+        description="Markdown body (max 20000 chars)",
     )
     description: Optional[str] = None
     tag_names: Optional[List[str]] = Field(
@@ -38,6 +41,16 @@ class PublishRequest(BaseModel):
     )
     channel: Optional[str] = Field(
         None, description="Source channel; defaults to publish.default_channel"
+    )
+    sync: bool = Field(
+        False,
+        description=(
+            "Sync mode (default false; reserved - requires "
+            "publish.allow_sync=true, otherwise 400 SYNC_DISABLED): wait for "
+            "post-processing (parse/enable) to finish before returning; "
+            "response then carries parse_status / enable_status. Wait "
+            "target/timeout/interval come from publish.* config"
+        ),
     )
 
 

@@ -236,7 +236,7 @@ python -m pytest tests -q
 ```
 
 四项增强均带有 mock（respx + FakeExecutor），**不触碰真实 WeKnora / PostgreSQL**。
-预期：111 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`，并配置 `FORGE_API_KEY` / `FORGE_KB_ID`）。
+预期：116 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`，并配置 `FORGE_API_KEY` / `FORGE_KB_ID`）。
 
 ---
 
@@ -345,16 +345,25 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 **相关实现**：`app/schemas.py::PublishRequest`。
 
 ### TC-10.1 title 超过 200 字符 → 422
+- **测试函数**：`tests/test_publish.py::test_publish_title_over_200_chars`
 - **请求体**：`title` 为 201 个字符。
-- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`。
+- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`；
+  `details` 中该字段 `type=string_too_long`，`ctx.actual_length=201`，
+  `msg` 带 `(actual: 201)`，且**不回显** `input`。
 
-### TC-10.2 content 超过 10000 字符 → 422
-- **请求体**：`content` 为 10001 个字符。
-- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`。
+### TC-10.2 content 超过 20000 字符 → 422
+- **测试函数**：`tests/test_publish.py::test_publish_content_over_20000_chars`
+- **请求体**：`content` 为 20001 个字符。
+- **预期**：HTTP 422，`error_id == "INVALID_REQUEST"`；
+  `ctx.max_length=20000`、`ctx.actual_length=20001`，
+  错误信封**不含**超长正文（`details[].input` 已剥离、响应体不含原文）。
+- **计数口径**：Unicode 码点数（Python `len`）——汉字/ASCII 各算 1，
+  emoji 按码点计（JS `.length`、UTF-8 字节数会更大，属正常差异）。
 
 ### TC-10.3 title 或 content 为空字符串 → 422
+- **测试函数**：`tests/test_publish.py::test_publish_empty_title_or_content`
 - **请求体**：`title: ""` 或 `content: ""`。
-- **预期**：HTTP 422（`min_length=1`）。
+- **预期**：HTTP 422（`min_length=1`，`type=string_too_short`）。
 
 ### TC-10.4 支持多标签 tag_names 数组
 - **请求体**：`tag_names: ["技术文档", "人工智能", "数据库"]`。
@@ -367,6 +376,32 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 ### TC-10.6 tag_names 为空数组或不传 → 无标签
 - **请求体**：`tag_names: []` 或不传 `tag_names` 字段。
 - **预期**：HTTP 200，响应中 `tag_names` 和 `tag_ids` 为 null。
+
+### TC-10.7 默认（不传 sync）→ 不等待后处理，发布调用后立即返回
+- **测试函数**：`tests/test_publish.py::test_publish_default_does_not_wait`
+- **步骤**：`POST /api/v2/publish`（无 `sync` 字段；config 中 `poll_interval_seconds > 0`）。
+- **预期**：
+  - HTTP 200，立即返回。
+  - 发布后**不轮询** `GET /knowledge/{id}`（仅元数据合并读取一次）。
+  - 响应中的 `parse_status` / `enable_status` 来自发布调用本身，而非等待结果。
+
+### TC-10.8 sync: true（allow_sync=true）→ 阻塞等待后处理完成才返回
+- **测试函数**：`tests/test_publish.py::test_publish_sync_waits_for_processing`
+- **前置**：config `publish.allow_sync=true`、`wait_until=enabled`、`timeout_seconds=2`、
+  `poll_interval_seconds=0.01`；respx 模拟 `GET /knowledge/kn-1` 第 1 次
+  `enable_status=pending`、第 2 次起 `enabled`。
+- **请求体**：`{"kb_id": "kb-1", "title": "t", "content": "c", "sync": true}`
+- **预期**：
+  - HTTP 200，`enable_status == "enabled"`（等待目标达成）。
+  - `GET /knowledge/kn-1` 被轮询 ≥ 2 次。
+  - 等待目标 / 超时 / 轮询间隔取 config.json `publish.*`，请求本身不带这些参数。
+
+### TC-10.9 sync: true 但 allow_sync=false（默认）→ 400 SYNC_DISABLED，无任何写操作
+- **测试函数**：`tests/test_publish.py::test_publish_sync_rejected_when_disabled`
+- **步骤**：默认配置（`publish.allow_sync=false`）下 `POST /api/v2/publish` 带 `sync: true`。
+- **预期**：
+  - HTTP 400，`error_id == "SYNC_DISABLED"`。
+  - 快速失败：未调用上游创建草稿（无 `POST .../knowledge/manual`），不留半成品。
 
 ---
 
@@ -421,4 +456,6 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 > search 返回完整 `metas`、`publish.timeout_seconds` 默认 300 等变更；
 > 本轮同步 `X-Forge-Signature` 改用 `api_secret`（`WEKNORA_API_KEY/SECRET` 环境变量 +
 > `data/keys.json` 多组密钥 + `app/keystore.py` 自动刷新缓存），新增
-> `tests/test_keystore.py` 与 `example.env` 密钥对模板。
+> `tests/test_keystore.py` 与 `example.env` 密钥对模板；
+> Publish 新增请求字段 `sync`（**预留**，默认异步返回；需 `publish.allow_sync=true`
+> 才会阻塞等待后处理完成，否则 400 `SYNC_DISABLED`）。

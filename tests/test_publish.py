@@ -188,8 +188,68 @@ def test_publish_requires_known_fields(client):
     assert resp.json()["error_id"] == "INVALID_REQUEST"
 
 
+def _post_invalid(client, body):
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": []})
+        )
+        resp = client.post(
+            PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+        )
+    return resp
+
+
+def test_publish_title_over_200_chars(client):
+    """TC-10.1: title longer than 200 chars -> 422 with actual length."""
+    resp = _post_invalid(client, {"kb_id": "kb-1", "title": "标" * 201, "content": "c"})
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["error_id"] == "INVALID_REQUEST"
+    err = next(d for d in data["details"] if "title" in d["loc"])
+    assert err["type"] == "string_too_long"
+    assert err["ctx"]["max_length"] == 200
+    assert err["ctx"]["actual_length"] == 201
+    assert "actual: 201" in err["msg"]
+    assert "input" not in err
+
+
+def test_publish_content_over_20000_chars(client):
+    """TC-10.2: content longer than 20000 chars -> 422, body not echoed back."""
+    content = "汉" * 20001
+    resp = _post_invalid(client, {"kb_id": "kb-1", "title": "t", "content": content})
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["error_id"] == "INVALID_REQUEST"
+    err = next(d for d in data["details"] if "content" in d["loc"])
+    assert err["type"] == "string_too_long"
+    assert err["ctx"]["max_length"] == 20000
+    assert err["ctx"]["actual_length"] == 20001
+    assert "actual: 20001" in err["msg"]
+    # the oversized article must not be echoed in the error envelope
+    assert "input" not in err
+    assert content not in resp.text
+
+
+def test_publish_empty_title_or_content(client):
+    """TC-10.3: empty title / content -> 422 (min_length=1)."""
+    for field in ("title", "content"):
+        body = {"kb_id": "kb-1", "title": "t", "content": "c"}
+        body[field] = ""
+        resp = _post_invalid(client, body)
+        assert resp.status_code == 422, field
+        data = resp.json()
+        assert data["error_id"] == "INVALID_REQUEST"
+        err = next(d for d in data["details"] if field in d["loc"])
+        assert err["type"] == "string_too_short"
+        assert err["ctx"]["min_length"] == 1
+        assert "input" not in err
+
+
 def test_publish_ignores_removed_request_parameters(client):
-    """wait / wait_until / timeout / idempotency_key no longer exist in the API surface."""
+    """wait / wait_until / timeout / idempotency_key are not part of the API surface.
+
+    Wait behaviour moved to config.json plus the new per-request ``sync`` flag.
+    """
     body = {
         "kb_id": "kb-1",
         "title": "t",
@@ -211,12 +271,76 @@ def test_publish_ignores_removed_request_parameters(client):
     assert resp.json()["knowledge_id"] == "kn-1"
 
 
-def test_publish_waits_when_configured(client):
+def test_publish_default_does_not_wait(client):
+    """sync defaults to false: the call must not poll after the publish flip."""
+    body = {"kb_id": "kb-1", "title": "t", "content": "c", "custom_metas": {"level": 3}}
+    gets = {"count": 0}
+
+    def _get(request):
+        gets["count"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "id": "kn-1",
+                    "custom_metadata": {},
+                    "parse_status": "pending",
+                    "enable_status": "pending",
+                },
+            },
+        )
+
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": []})
+        )
+        _mock_weknora(router)
+        router.get(f"{UPSTREAM}/knowledge/kn-1").mock(side_effect=_get)
+        resp = client.post(
+            PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+        )
+
+    assert resp.status_code == 200
+    # exactly one GET: the merge-metas read; no post-publish polling
+    assert gets["count"] == 1
+    # statuses come straight from the publish response, not from a wait loop
+    assert resp.json()["enable_status"] == "enabled"
+
+
+def test_publish_sync_rejected_when_disabled(client):
+    """sync is reserved: allow_sync=false (default) rejects before any upstream write."""
+    body = {"kb_id": "kb-1", "title": "t", "content": "c", "sync": True}
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": []})
+        )
+        _mock_weknora(router)
+        resp = client.post(
+            PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+        )
+
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["error_id"] == "SYNC_DISABLED"
+    assert isinstance(data["error_message"], str) and data["error_message"]
+    # fail-fast: no draft was created upstream
+    manual_posts = [
+        c
+        for c in router.calls
+        if c.request.method == "POST" and "knowledge/manual" in str(c.request.url)
+    ]
+    assert manual_posts == []
+
+
+def test_publish_sync_waits_for_processing(client):
+    """sync=true (with allow_sync) blocks until processing finishes."""
     from tests.conftest import write_config
 
     write_config(
         {
             "publish": {
+                "allow_sync": True,
                 "wait_until": "enabled",
                 "timeout_seconds": 2,
                 "poll_interval_seconds": 0.01,
@@ -224,7 +348,7 @@ def test_publish_waits_when_configured(client):
         }
     )
     try:
-        body = {"kb_id": "kb-1", "title": "t", "content": "c"}
+        body = {"kb_id": "kb-1", "title": "t", "content": "c", "sync": True}
         polls = {"count": 0}
 
         def _poll(request):
@@ -256,7 +380,7 @@ def test_publish_waits_when_configured(client):
         assert resp.json()["enable_status"] == "enabled"
         assert polls["count"] >= 2
     finally:
-        write_config({"publish": {"poll_interval_seconds": 0}})
+        write_config()  # restore BASE_CONFIG
 
 
 def test_publish_reuses_existing_tag_when_create_conflicts(client):

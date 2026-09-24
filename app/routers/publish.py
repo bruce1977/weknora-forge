@@ -18,9 +18,21 @@ router = APIRouter(tags=["v2-publish"])
 
 @router.post(
     "/publish",
-    summary="Publish an article (tags -> draft -> custom metas -> publish)",
+    summary="Publish an article (tags -> draft -> custom metas -> publish; sync=true waits for processing)",
     responses={
-        200: {"description": "success", "content": {"application/json": {"example": {"success": True, "knowledge_id": "6f1c...", "tag_ids": ["9a2b..."], "tag_names": ["tech"]}}}}
+        200: {
+            "description": "success",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "knowledge_id": "6f1c...",
+                        "tag_ids": ["9a2b..."],
+                        "tag_names": ["tech"],
+                    }
+                }
+            },
+        }
     },
 )
 async def publish_article(

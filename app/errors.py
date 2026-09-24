@@ -96,6 +96,31 @@ def database_error(message: str, details: Any = None) -> ForgeError:
     return ForgeError("DATABASE_ERROR", message, status.HTTP_502_BAD_GATEWAY, details)
 
 
+# Length-check error types where the echoed input is worth summarising as a count
+_LENGTH_ERRORS = {"string_too_long", "string_too_short"}
+
+
+def sanitize_validation_errors(errors: list) -> list:
+    """Make pydantic validation errors safe to return to the caller.
+
+    - drop ``input`` entirely: it echoes the raw request body (for a 10k-char
+      content that doubles the response and leaks the article back in logs)
+    - for length errors append the actual length so the caller can tell how
+      far over the limit they are without counting by hand
+    """
+    safe: list = []
+    for err in errors:
+        e = dict(err)
+        raw = e.pop("input", None)
+        if e.get("type") in _LENGTH_ERRORS and isinstance(raw, str):
+            actual = len(raw)
+            if isinstance(e.get("ctx"), dict):
+                e["ctx"] = {**e["ctx"], "actual_length": actual}
+            e["msg"] = f"{e.get('msg', '')} (actual: {actual})"
+        safe.append(e)
+    return safe
+
+
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ForgeError)
     async def _forge_error_handler(request: Request, exc: ForgeError) -> JSONResponse:
@@ -109,7 +134,7 @@ def install_exception_handlers(app: FastAPI) -> None:
             "INVALID_REQUEST",
             "Request validation failed",
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            exc.errors(),
+            sanitize_validation_errors(exc.errors()),
         )
 
     @app.exception_handler(Exception)

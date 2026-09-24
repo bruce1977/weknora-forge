@@ -46,7 +46,7 @@ python scripts/show_config.py                       # 看生效配置（密钥�
 > 必须带 `--no-proxy-headers`：转发头由 `app/proxy.py` 统一处理，uvicorn 自己处理只看 127.0.0.1，
 > 会把容器/内网隧道来的 `X-Forwarded-*` 全部忽略（详见第 3 节）。
 
-测试：`python -m pytest tests -q`（**111 通过 / 2 跳过**，live 需 `WEKNORA_BASE_URL` 与 `FORGE_API_KEY`/`FORGE_KB_ID`；其余用 respx 模拟，不需要真实 WeKnora 与数据库）。
+测试：`python -m pytest tests -q`（**116 通过 / 2 跳过**，live 需 `WEKNORA_BASE_URL` 与 `FORGE_API_KEY`/`FORGE_KB_ID`；其余用 respx 模拟，不需要真实 WeKnora 与数据库）。
 
 ---
 
@@ -200,11 +200,12 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 |------|------|------|------|------|
 | `kb_id` | string | ✓ | | 知识库 ID |
 | `title` | string | ✓ | 1-200 字符 | 文章标题 |
-| `content` | string | ✓ | 1-10000 字符 | Markdown 正文 |
+| `content` | string | ✓ | 1-20000 字符 | Markdown 正文 |
 | `description` | string | | | 可选描述 |
 | `tag_names` | string[] | | | 标签名称数组，如 `["技术文档", "AI"]` |
 | `custom_metas` | object | | | 自定义元数据 |
 | `channel` | string | | 默认 `"api"` | 来源渠道 |
+| `sync` | boolean | | 默认 `false` | 同步模式（**预留**：需 `publish.allow_sync=true`，否则 400 `SYNC_DISABLED`）：阻塞等待文章后处理完成后再返回，响应携带 `parse_status` / `enable_status`（等待目标/超时/间隔取 `publish.*` 配置） |
 
 ```JSON
 {
@@ -242,8 +243,11 @@ python scripts/gen_forge_signature.py --method GET --path /api/v2/probe \
 }
 ```
 
-> `poll_interval_seconds > 0` 时调用会被同步阻塞到后处理结束，成功返回在 `data` 中携带
-> `parse_status` / `enable_status`——经 Cloudflare 访问请设为 `0`
+> `sync` 为**预留**功能：除非 `publish.allow_sync=true`（默认 `false`），否则请求在产生
+> 任何上游写操作前即返回 400 `SYNC_DISABLED`。开启后 `sync: true` 阻塞至后处理达到
+> `publish.wait_until`（受 `timeout_seconds` 限制，按 `poll_interval_seconds` 轮询），
+> 成功返回携带 `parse_status` / `enable_status`。经 Cloudflare 访问请保持默认 `false`：
+> 100 秒回源限制会在处理继续时返回 524，且高并发下长连接堆积可能拖垮服务。
 
 ---
 
@@ -438,7 +442,7 @@ python scripts/hmac_request.py --api-key sk-xxxxx --dry-run DELETE '/api/v2/mana
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "wait_until": "enabled", "timeout_seconds": 300,
+  "publish":  { "allow_sync": false, "wait_until": "enabled", "timeout_seconds": 300,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
@@ -512,7 +516,7 @@ app/
     ├── publish_service.py # 发布编排（tags → 草稿 → 元数据 → 发布 → 可选等待）
     └── purge_service.py   # 物理清理（级联删除 + 孤儿清理）
 scripts/                   # gen_forge_signature.py / hmac_request.py / show_config.py
-tests/                     # 111 项（live 跳过 2），respx 模拟上游
+tests/                     # 116 项（live 跳过 2），respx 模拟上游
 FMQ.md                     # FMQ 查询语法完整参考
 pyproject.toml             # pytest 配置（asyncio_mode、testpaths）
 data/                      # 运行时数据（config.json、keys.json 等）

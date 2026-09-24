@@ -76,7 +76,7 @@ def _search_headers():
 
 
 def publish(app, title, content, *, tag_names=None, custom_metas=None) -> dict:
-    body: dict = {"kb_id": KB_ID, "title": title, "content": content}
+    body: dict = {"kb_id": KB_ID, "title": title, "content": content, "sync": True}
     if tag_names:
         body["tag_names"] = tag_names
     if custom_metas:
@@ -243,7 +243,8 @@ def app():
     mock_config_path = os.environ.get("FORGE_CONFIG", "")
     os.environ["FORGE_CONFIG"] = _REAL_CONFIG
     load_config.cache_clear()
-    get_config()
+    cfg = get_config()
+    cfg.publish.allow_sync = True  # live seed publishes with sync=true
     keystore.reset()
     if not keystore.get_secret(API_KEY):
         pytest.skip(
