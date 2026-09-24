@@ -9,6 +9,5 @@ __pycache__/
 
 .env
 .debug
-data/keys.json
 *.db
 *.sqlite3
