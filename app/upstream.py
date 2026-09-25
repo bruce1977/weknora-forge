@@ -52,7 +52,9 @@ class UpstreamResponse:
 
 
 class WeKnoraClient:
-    def __init__(self, config: Config, transport: Optional[httpx.AsyncBaseTransport] = None) -> None:
+    def __init__(
+        self, config: Config, transport: Optional[httpx.AsyncBaseTransport] = None
+    ) -> None:
         self.config = config
         upstream = config.upstream
         self._client = httpx.AsyncClient(
@@ -74,7 +76,9 @@ class WeKnoraClient:
     # ------------------------------------------------------------------ #
     # Low level
     # ------------------------------------------------------------------ #
-    def _headers(self, api_key: Optional[str], extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    def _headers(
+        self, api_key: Optional[str], extra: Optional[Mapping[str, str]] = None
+    ) -> Dict[str, str]:
         headers: Dict[str, str] = {"Accept": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key
@@ -130,9 +134,13 @@ class WeKnoraClient:
                 **kwargs,
             )
         except httpx.TimeoutException as exc:
-            raise upstream_error(f"Upstream request timed out: {method} {path}", str(exc), 504) from exc
+            raise upstream_error(
+                f"Upstream request timed out: {method} {path}", str(exc), 504
+            ) from exc
         except httpx.HTTPError as exc:
-            raise upstream_error(f"Upstream connection failed: {method} {path}", str(exc)) from exc
+            raise upstream_error(
+                f"Upstream connection failed: {method} {path}", str(exc)
+            ) from exc
 
         json_body_out, body_text = self._parse_body(resp)
         result = UpstreamResponse(
@@ -147,7 +155,9 @@ class WeKnoraClient:
             if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
                 message = detail["error"].get("message", message)
             raise upstream_error(
-                f"{message} ({method} {path} -> {resp.status_code})", detail, self._map_status(resp.status_code)
+                f"{message} ({method} {path} -> {resp.status_code})",
+                detail,
+                self._map_status(resp.status_code),
             )
         return result
 
@@ -164,7 +174,9 @@ class WeKnoraClient:
         """Passthrough variant: no JSON parsing, returns the raw httpx.Response (used for streaming)."""
         url = httpx.URL(path if path.startswith("/") else f"/{path}")
         if query:
-            url = url.copy_with(query=query.encode() if isinstance(query, str) else query)
+            url = url.copy_with(
+                query=query.encode() if isinstance(query, str) else query
+            )
         req = self._client.build_request(
             method.upper(),
             url,
@@ -175,7 +187,9 @@ class WeKnoraClient:
         try:
             return await self._client.send(req, stream=True)
         except httpx.HTTPError as exc:
-            raise upstream_error(f"Upstream connection failed: {method} {path}", str(exc)) from exc
+            raise upstream_error(
+                f"Upstream connection failed: {method} {path}", str(exc)
+            ) from exc
 
     @staticmethod
     def _map_status(code: int) -> int:
@@ -190,7 +204,9 @@ class WeKnoraClient:
     # ------------------------------------------------------------------ #
     # API key validation (layer 1 of v2 auth)
     # ------------------------------------------------------------------ #
-    async def validate_api_key(self, api_key: str, force: bool = False) -> Tuple[bool, str, int]:
+    async def validate_api_key(
+        self, api_key: str, force: bool = False
+    ) -> Tuple[bool, str, int]:
         """Ask WeKnora whether this key works: GET {upstream}/knowledge-bases.
 
         Returns (valid, message, upstream_status); upstream_status lets the caller tell
@@ -223,10 +239,16 @@ class WeKnoraClient:
                 valid, msg = False, f"WeKnora responded with HTTP {status}"
         except httpx.TimeoutException as exc:
             status = 504
-            valid, msg = False, f"Upstream timed out while validating the API key: {exc}"
+            valid, msg = (
+                False,
+                f"Upstream timed out while validating the API key: {exc}",
+            )
         except httpx.HTTPError as exc:
             status = 502
-            valid, msg = False, f"Upstream unreachable while validating the API key: {exc}"
+            valid, msg = (
+                False,
+                f"Upstream unreachable while validating the API key: {exc}",
+            )
 
         _CACHE_MAX = 5000
         _POSITIVE_TTL = 300
@@ -240,17 +262,29 @@ class WeKnoraClient:
     # ------------------------------------------------------------------ #
     # Semantic calls
     # ------------------------------------------------------------------ #
-    async def list_tags(self, kb_id: str, api_key: str, keyword: str = "", page_size: int = 100):
+    async def list_tags(
+        self, kb_id: str, api_key: str, keyword: str = "", page_size: int = 100
+    ):
         resp = await self.call(
             "GET",
             f"/knowledge-bases/{kb_id}/tags",
             api_key=api_key,
-            params={"page": 1, "page_size": page_size, **({"keyword": keyword} if keyword else {})},
+            params={
+                "page": 1,
+                "page_size": page_size,
+                **({"keyword": keyword} if keyword else {}),
+            },
         )
         payload = resp.data or {}
-        return list(payload.get("data", [])) if isinstance(payload, dict) else list(payload or [])
+        return (
+            list(payload.get("data", []))
+            if isinstance(payload, dict)
+            else list(payload or [])
+        )
 
-    async def find_tag_by_name(self, kb_id: str, api_key: str, name: str) -> Optional[Dict[str, Any]]:
+    async def find_tag_by_name(
+        self, kb_id: str, api_key: str, name: str
+    ) -> Optional[Dict[str, Any]]:
         for tag in await self.list_tags(kb_id, api_key, keyword=name):
             if tag.get("name") == name:
                 return tag
@@ -269,7 +303,9 @@ class WeKnoraClient:
             payload["color"] = color
         if sort_order is not None:
             payload["sort_order"] = sort_order
-        resp = await self.call("POST", f"/knowledge-bases/{kb_id}/tags", api_key=api_key, json_body=payload)
+        resp = await self.call(
+            "POST", f"/knowledge-bases/{kb_id}/tags", api_key=api_key, json_body=payload
+        )
         return resp.data or {}
 
     async def ensure_tag(
@@ -396,7 +432,12 @@ class WeKnoraClient:
             payload["tag_id"] = tag_id
         if channel:
             payload["channel"] = channel
-        resp = await self.call("POST", f"/knowledge-bases/{kb_id}/knowledge/manual", api_key=api_key, json_body=payload)
+        resp = await self.call(
+            "POST",
+            f"/knowledge-bases/{kb_id}/knowledge/manual",
+            api_key=api_key,
+            json_body=payload,
+        )
         return resp.data or {}
 
     async def update_knowledge(
@@ -417,7 +458,9 @@ class WeKnoraClient:
             payload["custom_metadata"] = custom_metadata
         if not payload:
             return {"skipped": True}
-        resp = await self.call("PUT", f"/knowledge/{knowledge_id}", api_key=api_key, json_body=payload)
+        resp = await self.call(
+            "PUT", f"/knowledge/{knowledge_id}", api_key=api_key, json_body=payload
+        )
         return resp.data
 
     async def update_manual_knowledge(
@@ -441,7 +484,12 @@ class WeKnoraClient:
             payload["tag_id"] = tag_id
         if not payload:
             return {}
-        resp = await self.call("PUT", f"/knowledge/manual/{knowledge_id}", api_key=api_key, json_body=payload)
+        resp = await self.call(
+            "PUT",
+            f"/knowledge/manual/{knowledge_id}",
+            api_key=api_key,
+            json_body=payload,
+        )
         return resp.data or {}
 
     async def get_knowledge(self, knowledge_id: str, api_key: str) -> Dict[str, Any]:
@@ -478,14 +526,27 @@ class WeKnoraClient:
             done = (
                 (until == "completed" and parse_status == "completed")
                 or (until == "enabled" and enable_status == "enabled")
-                or (until == "terminal" and parse_status in {"completed", "failed", "cancelled"})
+                or (
+                    until == "terminal"
+                    and parse_status in {"completed", "failed", "cancelled"}
+                )
             )
-            if done or time.time() >= deadline:
+            if done:
                 return {
                     "knowledge": last,
                     "attempts": attempts,
-                    "timed_out": not done,
+                    "timed_out": False,
                     "parse_status": parse_status,
                     "enable_status": enable_status,
                 }
-            await asyncio.sleep(interval)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return {
+                    "knowledge": last,
+                    "attempts": attempts,
+                    "timed_out": True,
+                    "parse_status": parse_status,
+                    "enable_status": enable_status,
+                }
+            # never sleep past the deadline: wake up in time for one final check
+            await asyncio.sleep(min(interval, remaining))

@@ -34,14 +34,30 @@ class ForgeError(Exception):
         self.details = details
 
 
+# Strings longer than this in an error envelope are replaced wholesale: an
+# error must state the reason, never echo the caller's (or upstream's) raw text.
+_ERROR_STRING_LIMIT = 500
+
+
+def redact_error_text(value: Any, limit: int = _ERROR_STRING_LIMIT) -> Any:
+    """Recursively replace over-long strings with ``<omitted N characters>``."""
+    if isinstance(value, str):
+        return value if len(value) <= limit else f"<omitted {len(value)} characters>"
+    if isinstance(value, dict):
+        return {k: redact_error_text(v, limit) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_error_text(v, limit) for v in value]
+    return value
+
+
 def error_body(error_id: str, message: str, details: Any = None) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "success": False,
         "error_id": error_id,
-        "error_message": message,
+        "error_message": redact_error_text(message),
     }
     if details is not None:
-        body["details"] = details
+        body["details"] = redact_error_text(details)
     return body
 
 

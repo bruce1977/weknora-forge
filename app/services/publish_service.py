@@ -36,12 +36,14 @@ class PublishResult:
         tag_names: Optional[list[str]] = None,
         parse_status: Optional[str] = None,
         enable_status: Optional[str] = None,
+        wait: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.knowledge_id = knowledge_id
         self.tag_ids = tag_ids
         self.tag_names = tag_names
         self.parse_status = parse_status
         self.enable_status = enable_status
+        self.wait = wait
 
     def as_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {"success": True}
@@ -51,6 +53,7 @@ class PublishResult:
             "tag_names",
             "parse_status",
             "enable_status",
+            "wait",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -118,18 +121,29 @@ class PublishService:
             await self._write_metas(req, api_key, knowledge_id)
 
             # ---------------- 2.3 publish ----------------
-            published = await self.client.update_manual_knowledge(
-                knowledge_id,
-                api_key,
-                title=req.title,
-                content=req.content,
-                status="publish",
-            )
+            try:
+                published = await self.client.update_manual_knowledge(
+                    knowledge_id,
+                    api_key,
+                    title=req.title,
+                    content=req.content,
+                    status="publish",
+                )
+            except ForgeError as exc:
+                await self._maybe_rollback(knowledge_id, api_key)
+                exc.message = f"{exc.message} (step: publish)"
+                raise
+            except Exception as exc:  # noqa: BLE001
+                await self._maybe_rollback(knowledge_id, api_key)
+                raise upstream_error(f"Failed to publish article: {exc}") from exc
             latest = published or {}
 
             # ---------------- 2.4 wait (sync mode) ----------------
+            wait_summary: Optional[Dict[str, Any]] = None
             if req.sync and knowledge_id:
-                latest = await self._wait(knowledge_id, api_key)
+                # a failed/timed-out wait must never wipe the statuses from 2.3
+                wait_summary, polled = await self._wait(knowledge_id, api_key)
+                latest = polled or latest
 
             return PublishResult(
                 knowledge_id=knowledge_id,
@@ -137,6 +151,7 @@ class PublishService:
                 tag_names=resolved_tag_names or None,
                 parse_status=latest.get("parse_status"),
                 enable_status=latest.get("enable_status"),
+                wait=wait_summary,
             )
         except ForgeError:
             raise
@@ -177,7 +192,15 @@ class PublishService:
             raise upstream_error(f"Failed to update custom_metadata: {exc}") from exc
 
     # ------------------------------------------------------------------ #
-    async def _wait(self, knowledge_id: str, api_key: str) -> Dict[str, Any]:
+    async def _wait(
+        self, knowledge_id: str, api_key: str
+    ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """Return ``(wait_summary, polled_knowledge_or_None)``.
+
+        Waiting must never fail the publish: on error the summary carries
+        ``failed`` and the caller keeps the statuses from the publish step;
+        on success/timeout the summary carries ``timed_out`` + ``attempts``.
+        """
         settings = self.config.publish
         # poll_interval <= 0 would spin hot: fall back to 1s so sync still works
         interval = (
@@ -202,10 +225,14 @@ class PublishService:
                     result.get("parse_status"),
                     result.get("enable_status"),
                 )
-            return result.get("knowledge") or {}
+            summary = {
+                "timed_out": bool(result.get("timed_out")),
+                "attempts": int(result.get("attempts") or 0),
+            }
+            return summary, result.get("knowledge") or None
         except Exception as exc:  # noqa: BLE001 - waiting must never fail the publish
             logger.warning("post-publish wait failed for %s: %s", knowledge_id, exc)
-            return {}
+            return {"failed": True}, None
 
     # ------------------------------------------------------------------ #
     async def _maybe_rollback(self, knowledge_id: str, api_key: str) -> None:

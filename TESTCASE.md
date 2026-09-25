@@ -236,7 +236,7 @@ python -m pytest tests -q
 ```
 
 四项增强均带有 mock（respx + FakeExecutor），**不触碰真实 WeKnora / PostgreSQL**。
-预期：116 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`，并配置 `FORGE_API_KEY` / `FORGE_KB_ID`）。
+预期：120 项通过、2 项跳过（live 测试需 `WEKNORA_BASE_URL`，并配置 `FORGE_API_KEY` / `FORGE_KB_ID`）。
 
 ---
 
@@ -394,6 +394,7 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 - **预期**：
   - HTTP 200，`enable_status == "enabled"`（等待目标达成）。
   - `GET /knowledge/kn-1` 被轮询 ≥ 2 次。
+  - 响应含 `wait == {"timed_out": false, "attempts": 轮询次数}`。
   - 等待目标 / 超时 / 轮询间隔取 config.json `publish.*`，请求本身不带这些参数。
 
 ### TC-10.9 sync: true 但 allow_sync=false（默认）→ 400 SYNC_DISABLED，无任何写操作
@@ -402,6 +403,39 @@ python scripts/gen_forge_signature.py --method POST --path /api/v2/publish \
 - **预期**：
   - HTTP 400，`error_id == "SYNC_DISABLED"`。
   - 快速失败：未调用上游创建草稿（无 `POST .../knowledge/manual`），不留半成品。
+
+### TC-10.10 上游报错回显正文 → 保留错误原因，正文替换为占位符
+- **测试函数**：`tests/test_publish.py::test_publish_upstream_error_omits_raw_article`
+- **步骤**：上游 `POST .../knowledge/manual` 返回 500，
+  `error.message` 为简短原因，响应体附带整段正文回显。
+- **预期**：
+  - HTTP 502，`error_id == "UPSTREAM_ERROR"`，`error_message` 含上游原因。
+  - 错误信封中超过 500 字符的字符串统一替换为 `<omitted N characters>`
+    （`app/errors.py::redact_error_text`，对 `error_message` 与 `details` 生效），
+    响应体**不含**原文。
+
+### TC-10.11 sync 等待期间轮询失败 → 200，状态回退为发布结果，`wait.failed`
+- **测试函数**：`tests/test_publish.py::test_publish_sync_wait_error_keeps_publish_statuses`
+- **前置**：`allow_sync=true`；respx 令 `GET /knowledge/kn-1` 始终返回 500。
+- **预期**：
+  - HTTP 200（等待层错误不使发布失败）。
+  - `enable_status` 来自发布调用本身（`"enabled"`），不被失败的等待抹掉。
+  - `wait == {"failed": true}`。
+
+### TC-10.12 sync 等待超时 → 200 + `wait.timed_out=true`，带最后一次轮询状态
+- **测试函数**：`tests/test_publish.py::test_publish_sync_timeout_is_reported`
+- **前置**：`allow_sync=true`、`timeout_seconds=1`、`poll_interval_seconds=0.01`；
+  respx 令 `GET /knowledge/kn-1` 始终 `enable_status=pending`。
+- **预期**：
+  - HTTP 200，`wait.timed_out == true` 且 `wait.attempts >= 1`。
+  - `enable_status` 为最后一次轮询到的状态（`"pending"`）。
+
+### TC-10.13 发布翻转（2.3）失败 → 回滚半成品草稿
+- **测试函数**：`tests/test_publish.py::test_publish_flip_failure_rolls_back_draft`
+- **步骤**：`PUT .../knowledge/manual/kn-1` 返回 500（`rollback_on_failure=true`）。
+- **预期**：
+  - HTTP 502，`error_message` 带 `(step: publish)` 步骤标注。
+  - 调用 `DELETE /knowledge/kn-1` 清理 2.1 创建的草稿，不留半成品。
 
 ---
 

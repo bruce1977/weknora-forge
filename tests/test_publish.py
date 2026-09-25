@@ -174,6 +174,45 @@ def test_publish_failure_uses_error_envelope(client):
     assert isinstance(data["error_message"], str) and data["error_message"]
 
 
+def test_publish_upstream_error_omits_raw_article(client):
+    """TC-10.10: upstream failure states the reason, never echoes the article."""
+    import json
+
+    article = "秘密正文" * 500  # 2000 chars, way over the 500-char redaction limit
+    body = {"kb_id": "kb-1", "title": "t", "content": "c"}
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": []})
+        )
+        _mock_weknora(router)
+        # upstream rejects the draft AND echoes the article back in its body
+        router.post(f"{UPSTREAM}/knowledge-bases/kb-1/knowledge/manual").mock(
+            return_value=httpx.Response(
+                500,
+                json={
+                    "error": {
+                        "message": "manual knowledge rejected: unsupported markup"
+                    },
+                    "echoed": {"content": article},
+                },
+            )
+        )
+        resp = client.post(
+            PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+        )
+
+    assert resp.status_code == 502
+    data = resp.json()
+    assert data["error_id"] == "UPSTREAM_ERROR"
+    # the clear upstream reason survives
+    assert "manual knowledge rejected" in data["error_message"]
+    # the raw article is replaced by a placeholder everywhere
+    dumped = json.dumps(data, ensure_ascii=False)
+    assert article not in dumped
+    assert "秘密正文" not in resp.text
+    assert f"<omitted {len(article)} characters>" in dumped
+
+
 def test_publish_requires_known_fields(client):
     with respx.mock(assert_all_called=False) as router:
         router.get(VALIDATE_URL).mock(
@@ -377,10 +416,125 @@ def test_publish_sync_waits_for_processing(client):
             )
 
         assert resp.status_code == 200
-        assert resp.json()["enable_status"] == "enabled"
+        data = resp.json()
+        assert data["enable_status"] == "enabled"
         assert polls["count"] >= 2
+        # the response states how the wait went
+        assert data["wait"] == {"timed_out": False, "attempts": polls["count"]}
     finally:
         write_config()  # restore BASE_CONFIG
+
+
+def test_publish_sync_wait_error_keeps_publish_statuses(client):
+    """TC-10.11: polling failure must not wipe statuses from the publish response."""
+    from tests.conftest import write_config
+
+    write_config(
+        {
+            "publish": {
+                "allow_sync": True,
+                "timeout_seconds": 2,
+                "poll_interval_seconds": 0.01,
+            }
+        }
+    )
+    try:
+        body = {"kb_id": "kb-1", "title": "t", "content": "c", "sync": True}
+        with respx.mock(assert_all_called=False) as router:
+            router.get(VALIDATE_URL).mock(
+                return_value=httpx.Response(200, json={"success": True, "data": []})
+            )
+            _mock_weknora(router)
+            # every poll fails: the wait layer swallows it, the publish does not
+            router.get(f"{UPSTREAM}/knowledge/kn-1").mock(
+                return_value=httpx.Response(500, json={"error": {"message": "db down"}})
+            )
+            resp = client.post(
+                PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        # statuses still come from the publish flip, not from the failed wait
+        assert data["enable_status"] == "enabled"
+        assert data["wait"] == {"failed": True}
+    finally:
+        write_config()
+
+
+def test_publish_sync_timeout_is_reported(client):
+    """TC-10.12: wait exceeding timeout_seconds -> 200 with wait.timed_out."""
+    from tests.conftest import write_config
+
+    write_config(
+        {
+            "publish": {
+                "allow_sync": True,
+                "timeout_seconds": 1,
+                "poll_interval_seconds": 0.01,
+            }
+        }
+    )
+    try:
+        body = {"kb_id": "kb-1", "title": "t", "content": "c", "sync": True}
+        with respx.mock(assert_all_called=False) as router:
+            router.get(VALIDATE_URL).mock(
+                return_value=httpx.Response(200, json={"success": True, "data": []})
+            )
+            _mock_weknora(router)
+            router.get(f"{UPSTREAM}/knowledge/kn-1").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "id": "kn-1",
+                            "parse_status": "pending",
+                            "enable_status": "pending",
+                        },
+                    },
+                )
+            )
+            resp = client.post(
+                PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["wait"]["timed_out"] is True
+        assert data["wait"]["attempts"] >= 1
+        # last polled snapshot is still reported
+        assert data["enable_status"] == "pending"
+    finally:
+        write_config()
+
+
+def test_publish_flip_failure_rolls_back_draft(client):
+    """TC-10.13: publish flip failure -> half-built draft is removed."""
+    body = {"kb_id": "kb-1", "title": "t", "content": "c"}
+    deletes = []
+    with respx.mock(assert_all_called=False) as router:
+        router.get(VALIDATE_URL).mock(
+            return_value=httpx.Response(200, json={"success": True, "data": []})
+        )
+        _mock_weknora(router)
+        router.put(f"{UPSTREAM}/knowledge/manual/kn-1").mock(
+            return_value=httpx.Response(500, json={"error": {"message": "flip failed"}})
+        )
+
+        def _delete(request):
+            deletes.append(str(request.url))
+            return httpx.Response(200, json={"success": True})
+
+        router.delete(f"{UPSTREAM}/knowledge/kn-1").mock(side_effect=_delete)
+        resp = client.post(
+            PUBLISH_PATH, json=body, headers=auth_headers("POST", PUBLISH_PATH)
+        )
+
+    assert resp.status_code == 502
+    data = resp.json()
+    assert data["error_id"] == "UPSTREAM_ERROR"
+    assert "(step: publish)" in data["error_message"]
+    # rollback_on_failure=true: the draft created in step 2.1 is cleaned up
+    assert deletes, "draft must be rolled back after a failed publish flip"
 
 
 def test_publish_reuses_existing_tag_when_create_conflicts(client):

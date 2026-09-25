@@ -28,7 +28,7 @@
   "publish": {
     "allow_sync": "${PUBLISH_ALLOW_SYNC:-false}",
     "wait_until": "enabled",
-    "timeout_seconds": 90,
+    "timeout_seconds": 55,
     "poll_interval_seconds": 3.0,
     "default_channel": "api",
     "merge_metas": true,

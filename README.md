@@ -48,7 +48,7 @@ python scripts/show_config.py                       # effective config, secrets 
 > Uvicorn's own handling only trusts 127.0.0.1, so it would silently ignore `X-Forwarded-*`
 > coming from a container or tunnel (see chapter 3).
 
-Tests: `python -m pytest tests -q` (**116 passed, 2 skipped** — live tests need `WEKNORA_BASE_URL`
+Tests: `python -m pytest tests -q` (**120 passed, 2 skipped** — live tests need `WEKNORA_BASE_URL`
 and `FORGE_API_KEY`/`FORGE_KB_ID`; the rest are mocked with respx, no real WeKnora or database required).
 
 ---
@@ -208,7 +208,7 @@ Executes the full publish orchestration: resolve tag names → create/get tags �
 | `tag_names` | string[] | | | Tag name array, e.g. `["docs", "ai"]` |
 | `custom_metas` | object | | | Custom metadata |
 | `channel` | string | | default `"api"` | Source channel |
-| `sync` | boolean | | default `false` | Sync mode (**reserved**: needs `publish.allow_sync=true`, else 400 `SYNC_DISABLED`): block until post-processing finishes; response then carries `parse_status` / `enable_status` (wait target / timeout / interval from `publish.*` config) |
+| `sync` | boolean | | default `false` | Sync mode (**reserved**: needs `publish.allow_sync=true`, else 400 `SYNC_DISABLED`): block until post-processing finishes; response then carries `parse_status` / `enable_status` plus a `wait` summary (`timed_out` / `attempts`, or `failed` if polling errored — statuses then come from the publish call). Wait target / timeout / interval from `publish.*` config |
 
 ```JSON
 {
@@ -250,9 +250,14 @@ Executes the full publish orchestration: resolve tag names → create/get tags �
 > the call fails fast with 400 `SYNC_DISABLED` before any upstream write. When enabled,
 > `sync: true` blocks until post-processing reaches `publish.wait_until` (bounded by
 > `timeout_seconds`, polling every `poll_interval_seconds`) and the response then also
-> carries `parse_status` / `enable_status`. Keep the default `false` behind Cloudflare:
-> the 100-second origin limit would return 524 while the work continues, and long-held
-> connections can pile up under load.
+> carries `parse_status` / `enable_status` and a `wait` object
+> (`{"timed_out": false, "attempts": n}` on completion, `{"timed_out": true, ...}` on
+> timeout — still HTTP 200 — or `{"failed": true}` when polling itself errors; statuses
+> then fall back to the publish response). Keep `timeout_seconds` below your
+> reverse-proxy read timeout (deployed default 55s < nginx 60s) so the wait times out
+> cleanly instead of the proxy returning 504/524. Keep the default `false` behind
+> Cloudflare: the 100-second origin limit would return 524 while the work continues,
+> and long-held connections can pile up under load.
 
 ---
 
@@ -488,7 +493,7 @@ into the file:
                 "timeout_seconds": 60, "api_key_validate_path": "/knowledge-bases?page=1&page_size=1" },
   "auth":     { "mode": "hmac", "require_on_v1": true, "require_on_v2": true,
                 "hmac_header_signature": "X-Forge-Signature" },
-  "publish":  { "allow_sync": false, "wait_until": "enabled", "timeout_seconds": 300,
+  "publish":  { "allow_sync": false, "wait_until": "enabled", "timeout_seconds": 55,
                 "poll_interval_seconds": 3.0, "default_channel": "api",
                 "merge_metas": true, "rollback_on_failure": true },
   "database": { "dsn": "${FORGE_DB_DSN:-}", "host": "${DB_HOST:-localhost}", "port": "${DB_PORT:-5432}",
@@ -538,6 +543,10 @@ Error envelope:
 {"success": false, "error_id": "UPSTREAM_ERROR", "error_message": "...", "details": {...}}
 ```
 
+Strings longer than 500 chars in `error_message`/`details` are replaced with
+`<omitted N characters>` — errors state the reason, never echo raw request or
+upstream text.
+
 Common `error_id` values: `INVALID_SIGNATURE` / `INVALID_API_KEY` / `UNAUTHORIZED` / `FORBIDDEN` /
 `KB_ACCESS_DENIED` / `UPSTREAM_ERROR` / `DATABASE_ERROR` / `DB_NOT_CONFIGURED` / `UNSAFE_IDENTIFIER` /
 `TABLE_NOT_FOUND` / `METADATA_COLUMN_MISSING` / `TAG_NOT_FOUND` / `PURGE_LIMIT_EXCEEDED` /
@@ -566,7 +575,7 @@ app/
     ├── publish_service.py # publish orchestration (tags -> draft -> metas -> publish -> optional wait)
     └── purge_service.py   # physical purge (cascade delete + orphan sweep)
 scripts/                   # gen_forge_signature.py / hmac_request.py / show_config.py
-tests/                     # 116 tests (2 live skipped), respx mocked upstream
+tests/                     # 120 tests (2 live skipped), respx mocked upstream
 FMQ.md                     # FMQ query language full reference
 pyproject.toml             # pytest config (asyncio_mode, testpaths)
 data/                      # runtime data (config.json, keys.json, ...)
